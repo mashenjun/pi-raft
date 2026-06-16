@@ -1,0 +1,10 @@
+{
+  "name": "pi-raft",
+  "version": "0.1.0",
+  "description": "Raft/Slock collaboration workflow guardrails for Pi agents.",
+  "keywords": ["pi-package", "pi", "raft", "slock", "agent-workflow"],
+  "pi": {
+    "skills": ["./skills"],
+    "prompts": ["./prompts"]
+  }
+}
