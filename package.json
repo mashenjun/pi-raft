@@ -1,9 +1,16 @@
 {
   "name": "pi-raft",
   "version": "0.1.0",
-  "description": "Raft/Slock collaboration workflow guardrails for Pi agents.",
+  "private": true,
+  "description": "Workflow enforcement extension for pi agents operating in slock. Intercepts bash calls, validates workflow state, and blocks violations.",
   "keywords": ["pi-package", "pi", "raft", "slock", "agent-workflow"],
+  "license": "MIT",
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.79.0",
+    "typebox": "^1.2.0"
+  },
   "pi": {
+    "extensions": ["./extensions"],
     "skills": ["./skills"],
     "prompts": ["./prompts"]
   }
