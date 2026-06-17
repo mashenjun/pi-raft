@@ -109,6 +109,51 @@ describe("hasChainingOperators", () => {
   });
 });
 
+describe("normalization: raft message → raft msg", () => {
+  it("normalizes raft message read to noun=msg verb=read", () => {
+    const result = parseRaftCommands("raft message read --channel #pi-raft");
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({ noun: "msg", verb: "read" });
+    expect(result[0].args.channel).toBe("#pi-raft");
+  });
+
+  it("normalizes raft message send to noun=msg verb=post", () => {
+    const result = parseRaftCommands('raft message send --target "#pi-raft" "hello"');
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({ noun: "msg", verb: "post" });
+    expect(result[0].args.target).toBe('"#pi-raft"');
+  });
+
+  it("normalizes raft message check", () => {
+    const result = parseRaftCommands("raft message check");
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({ noun: "msg", verb: "check" });
+  });
+
+  it("preserves original rawSegment after normalization", () => {
+    const result = parseRaftCommands("raft message read --channel #general");
+    expect(result[0].rawSegment).toContain("raft message read");
+  });
+
+  it("chained raft message commands still detected", () => {
+    const result = parseRaftCommands("raft message read && raft task claim 42");
+    expect(result).toHaveLength(2);
+    expect(result[0]).toMatchObject({ noun: "msg", verb: "read" });
+    expect(result[1]).toMatchObject({ noun: "task", verb: "claim" });
+  });
+
+  it("existing raft msg read still works unchanged", () => {
+    const result = parseRaftCommands("raft msg read --channel general");
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({ noun: "msg", verb: "read" });
+  });
+
+  it("rejects unknown noun after normalization", () => {
+    const result = parseRaftCommands("raft channel join #pi-raft");
+    expect(result).toHaveLength(0);
+  });
+});
+
 describe("detectDuplicateCommand", () => {
   it("detects identical commands with same args", () => {
     const cmds = parseRaftCommands(

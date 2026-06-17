@@ -104,12 +104,17 @@ function matchRaftCommand(segment: string): ParsedCommand | null {
   const match = segment.match(RAFT_COMMAND_RE);
   if (!match) return null;
 
-  const noun = match[1] as "msg" | "task";
+  let noun = match[1];
+  let verb = match[2];
+
+  if (noun === "message") noun = "msg";
   if (noun !== "msg" && noun !== "task") return null;
 
+  if (noun === "msg" && verb === "send") verb = "post";
+
   return {
-    noun,
-    verb: match[2],
+    noun: noun as "msg" | "task",
+    verb,
     args: parseSegmentArgs(match[3] ?? ""),
     rawSegment: segment,
   };
