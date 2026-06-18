@@ -1,112 +1,122 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { parseRaftCommands, hasChainingOperators, detectDuplicateCommand } from "./raft-parser";
-import { createStateMachine } from "./state-machine";
-import type { RaftAction } from "./state-machine";
 import { scanCredentials } from "./credential-scanner";
+import {
+  detectDuplicateCommand,
+  hasChainingOperators,
+  parseRaftCommands,
+} from "./raft-parser";
+import { createStateMachine } from "./state-machine";
+import type { RaftAction, SlockState } from "./state-machine";
+
+const STATE_ENTRY_TYPE = "pi-raft-state";
+const sm = createStateMachine();
 
 export default function (pi: ExtensionAPI): void {
-  const sm = createStateMachine();
+  function persistState(): void {
+    pi.appendEntry({
+      type: "custom",
+      content: JSON.stringify(sm.snapshot()),
+      source: "extension",
+    });
+  }
+
+  pi.on("session_start", (_event, ctx) => {
+    const entries = ctx.sessionManager.getEntries();
+    let latest: { currentState: string; taskId: string | null; replyTarget: unknown } | null =
+      null;
+
+    for (const entry of entries) {
+      if (entry.type !== "custom" || entry.source !== "extension") continue;
+      try {
+        const data = JSON.parse(entry.content);
+        if (data && typeof data === "object" && "currentState" in data) {
+          latest = data;
+        }
+      } catch {
+        // skip unparseable entries
+      }
+    }
+
+    if (latest) {
+      sm.restore({
+        currentState: latest.currentState as SlockState,
+        taskId: latest.taskId ?? null,
+        replyTarget: latest.replyTarget as { channel: string; threadTs?: string } | null,
+      });
+      console.log(`[pi-raft] restored state: ${latest.currentState}`);
+    }
+  });
+
+  pi.on("session_shutdown", () => {
+    persistState();
+  });
 
   pi.on("tool_call", async (event, _ctx) => {
     if (event.toolName === "bash") {
-      const cmd: string = (event.input as { command?: string }).command ?? "";
-      if (!cmd) return;
-
-      // P7: chained raft commands via &&, ;, ||
-      if (hasChainingOperators(cmd)) {
-        return {
-          block: true,
-          reason:
-            "Multiple raft commands chained in one call. Split them into separate calls.\n" +
-            `Current state: ${sm.currentState}`,
-        };
+      const command = getBashCommand(event.input);
+      if (!command) {
+        return;
       }
 
-      const raftCommands = parseRaftCommands(cmd);
+      if (hasChainingOperators(command)) {
+        return blockToolCall(
+          buildBlockMessage(
+            "Multiple raft commands chained in one call. Split them into separate calls.",
+            sm.snapshot().currentState,
+          ),
+        );
+      }
 
+      const raftCommands = parseRaftCommands(command);
       if (raftCommands.length > 0) {
-        // P11: duplicate raft command in same call
         if (detectDuplicateCommand(raftCommands)) {
-          return {
-            block: true,
-            reason:
-              "Duplicate raft command detected in the same call.\n" +
-              `Current state: ${sm.currentState}`,
-          };
-        }
-
-        if (raftCommands.length > 1) {
-          return {
-            block: true,
-            reason:
-              "Multiple raft commands in one call. Run each raft command separately.\n" +
-              `Current state: ${sm.currentState}`,
-          };
-        }
-
-        const parsed = raftCommands[0];
-        const action: RaftAction = {
-          noun: parsed.noun,
-          verb: parsed.verb,
-          args: parsed.args,
-        };
-
-        const result = sm.transition(action);
-        if (result.allowed) {
-          console.log(
-            `[pi-raft] ${result.newState}` +
-              (result.taskId ? ` | task: #${result.taskId}` : ""),
+          return blockToolCall(
+            buildBlockMessage(
+              "Duplicate raft command detected.",
+              sm.snapshot().currentState,
+            ),
           );
-          return;
         }
 
-        return {
-          block: true,
-          reason: buildBlockMessage(result.reason, sm.currentState),
-        };
+        for (const parsed of raftCommands) {
+          const before = sm.snapshot();
+          const result = sm.transition(toRaftAction(parsed));
+
+          if (!result.allowed) {
+            return blockToolCall(buildBlockMessage(result.reason, before.currentState));
+          }
+
+          persistState();
+
+          const after = sm.snapshot();
+          console.log(
+            `[pi-raft] state ${before.currentState} -> ${after.currentState}` +
+              (after.taskId ? ` | task: ${after.taskId}` : ""),
+          );
+        }
+
+        return;
       }
 
-      // P6: scan bash for credential patterns
-      const credMatch = scanCredentials(cmd);
-      if (credMatch) {
-        return {
-          block: true,
-          reason: `Credential detected: "${credMatch}". Remove it before executing.`,
-        };
+      const credentialMatch = scanCredentials(command);
+      if (credentialMatch) {
+        return blockToolCall(
+          `Blocked: Credential detected: '${credentialMatch}'. Remove it before posting.`,
+        );
       }
 
       return;
     }
 
     if (event.toolName === "write" || event.toolName === "edit") {
-      // P6: scan file content for credentials
-      const { content, oldString, newString } = event.input as {
-        content?: string;
-        oldString?: string;
-        newString?: string;
-      };
-      const textToScan = content ?? oldString ?? newString ?? "";
-
-      if (textToScan) {
-        const credMatch = scanCredentials(textToScan);
-        if (credMatch) {
-          return {
-            block: true,
-            reason: `Credential detected in file content: "${credMatch}". Remove it before writing.`,
-          };
-        }
-      }
-
-      // P2: must have claimed a task before writing files
       const canWrite = sm.canWrite();
       if (!canWrite.allowed) {
-        return {
-          block: true,
-          reason: buildBlockMessage(
-            canWrite.reason ?? "write requires a claimed task",
-            sm.currentState,
+        return blockToolCall(
+          buildBlockMessage(
+            canWrite.reason ?? "must claim a task first (raft task claim <task-id>)",
+            sm.snapshot().currentState,
           ),
-        };
+        );
       }
 
       return;
@@ -115,38 +125,64 @@ export default function (pi: ExtensionAPI): void {
     return;
   });
 
-  // TODO Group D: session_start hook
   // TODO Group E: before_agent_start hook
 }
 
-function buildBlockMessage(reason: string, currentState: string): string {
-  const lines = [
-    `Blocked: ${reason}`,
-    `Current state: ${currentState}`,
-  ];
+function getBashCommand(input: unknown): string {
+  if (!input || typeof input !== "object") {
+    return "";
+  }
+
+  const maybeCommand = (input as { command?: unknown }).command;
+  return typeof maybeCommand === "string" ? maybeCommand : "";
+}
+
+function toRaftAction(parsed: {
+  noun: RaftAction["noun"];
+  verb: string;
+  args: Record<string, string>;
+}): RaftAction {
+  return {
+    noun: parsed.noun,
+    verb: parsed.verb,
+    args: parsed.args,
+  };
+}
+
+function blockToolCall(reason: string): { block: true; reason: string } {
+  return {
+    block: true,
+    reason,
+  };
+}
+
+function buildBlockMessage(reason: string, currentState: SlockState): string {
+  const lines = [`Blocked: ${reason}`, `Current state: ${currentState}`];
 
   if (currentState === "IDLE") {
     lines.push(
-      "\u2192 Next: raft msg read --channel <channel>",
-      "\u2192 Then: raft task claim <task-id>",
+      "→ Next: raft msg read --channel <channel>",
+      "→ Then: raft task claim <task-id>",
     );
   } else if (currentState === "MESSAGES_READ") {
     lines.push(
-      "\u2192 Next: raft task claim <task-id>",
-      "\u2192 Then: raft task status in_review <task-id>",
+      "→ Next: raft task claim <task-id>",
+      "→ Then: raft task status in_review <task-id>",
     );
   } else if (currentState === "TASK_CLAIMED") {
     lines.push(
-      "\u2192 Next: raft task status in_review <task-id>",
-      "\u2192 Then: write your changes",
+      "→ Next: raft task status in_review <task-id>",
+      '→ Then: raft msg post --channel <channel> --thread <ts> "your reply"',
     );
   } else if (currentState === "IN_REVIEW") {
     lines.push(
-      '\u2192 Next: raft msg post --channel <channel> --thread <ts> "your reply"',
+      '→ Next: raft msg post --channel <channel> --thread <ts> "your reply"',
+      "→ Then: raft msg read --channel <channel>",
     );
   } else if (currentState === "DONE") {
     lines.push(
-      "\u2192 Next: raft msg read --channel <channel> (start next task)",
+      "→ Next: raft msg read --channel <channel>",
+      "→ Then: raft task claim <task-id>",
     );
   }
 
