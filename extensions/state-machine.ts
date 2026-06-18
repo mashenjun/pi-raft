@@ -10,7 +10,7 @@ export type TransitionResult =
   | { allowed: true; newState: SlockState; taskId?: string }
   | { allowed: false; reason: string };
 
-interface ActiveState {
+export interface ActiveState {
   currentState: SlockState;
   taskId: string | null;
   replyTarget: { channel: string; threadTs?: string } | null;

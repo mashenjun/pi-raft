@@ -6,43 +6,29 @@ import {
   parseRaftCommands,
 } from "./raft-parser";
 import { createStateMachine } from "./state-machine";
-import type { RaftAction, SlockState } from "./state-machine";
+import type { ActiveState, RaftAction, SlockState } from "./state-machine";
+import { buildSlockContext } from "./context-builder";
 
-const STATE_ENTRY_TYPE = "pi-raft-state";
 const sm = createStateMachine();
 
 export default function (pi: ExtensionAPI): void {
   function persistState(): void {
-    pi.appendEntry({
-      type: "custom",
-      content: JSON.stringify(sm.snapshot()),
-      source: "extension",
-    });
+    pi.appendEntry("pi-raft-state", sm.snapshot());
   }
 
   pi.on("session_start", (_event, ctx) => {
-    const entries = ctx.sessionManager.getEntries();
-    let latest: { currentState: string; taskId: string | null; replyTarget: unknown } | null =
-      null;
+    let latest: ActiveState | null = null;
 
-    for (const entry of entries) {
-      if (entry.type !== "custom" || entry.source !== "extension") continue;
-      try {
-        const data = JSON.parse(entry.content);
-        if (data && typeof data === "object" && "currentState" in data) {
-          latest = data;
-        }
-      } catch {
-        // skip unparseable entries
+    for (const entry of ctx.sessionManager.getEntries()) {
+      if (entry.type !== "custom" || entry.customType !== "pi-raft-state") continue;
+      const data = (entry as { data?: ActiveState }).data;
+      if (data && typeof data.currentState === "string") {
+        latest = data;
       }
     }
 
     if (latest) {
-      sm.restore({
-        currentState: latest.currentState as SlockState,
-        taskId: latest.taskId ?? null,
-        replyTarget: latest.replyTarget as { channel: string; threadTs?: string } | null,
-      });
+      sm.restore(latest);
       console.log(`[pi-raft] restored state: ${latest.currentState}`);
     }
   });
@@ -125,7 +111,12 @@ export default function (pi: ExtensionAPI): void {
     return;
   });
 
-  // TODO Group E: before_agent_start hook
+  pi.on("before_agent_start", async (event, _ctx) => {
+    const context = buildSlockContext(sm.snapshot());
+    return {
+      systemPrompt: event.systemPrompt + "\n\n" + context,
+    };
+  });
 }
 
 function getBashCommand(input: unknown): string {
