@@ -2,16 +2,15 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { scanCredentials } from "./credential-scanner";
 import {
   detectDuplicateCommand,
-  hasChainingOperators,
   parseRaftCommands,
 } from "./raft-parser";
 import { createStateMachine } from "./state-machine";
 import type { ActiveState, RaftAction, SlockState } from "./state-machine";
 import { buildSlockContext } from "./context-builder";
 
-const sm = createStateMachine();
-
 export default function (pi: ExtensionAPI): void {
+  const sm = createStateMachine();
+
   function persistState(): void {
     pi.appendEntry("pi-raft-state", sm.snapshot());
   }
@@ -44,26 +43,27 @@ export default function (pi: ExtensionAPI): void {
         return;
       }
 
-      if (hasChainingOperators(command)) {
+      const credentialMatch = scanCredentials(command);
+      if (credentialMatch) {
+        return blockToolCall(
+          `Blocked: Credential detected: '${credentialMatch}'. Remove it before posting.`,
+        );
+      }
+
+      const raftCommands = parseRaftCommands(command);
+      if (raftCommands.length > 1) {
+        const reason = detectDuplicateCommand(raftCommands)
+          ? "Duplicate raft command detected."
+          : "Multiple raft commands in one call. Split them into separate calls.";
         return blockToolCall(
           buildBlockMessage(
-            "Multiple raft commands chained in one call. Split them into separate calls.",
+            reason,
             sm.snapshot().currentState,
           ),
         );
       }
 
-      const raftCommands = parseRaftCommands(command);
       if (raftCommands.length > 0) {
-        if (detectDuplicateCommand(raftCommands)) {
-          return blockToolCall(
-            buildBlockMessage(
-              "Duplicate raft command detected.",
-              sm.snapshot().currentState,
-            ),
-          );
-        }
-
         for (const parsed of raftCommands) {
           const before = sm.snapshot();
           const result = sm.transition(toRaftAction(parsed));
@@ -84,17 +84,18 @@ export default function (pi: ExtensionAPI): void {
         return;
       }
 
-      const credentialMatch = scanCredentials(command);
-      if (credentialMatch) {
-        return blockToolCall(
-          `Blocked: Credential detected: '${credentialMatch}'. Remove it before posting.`,
-        );
-      }
-
       return;
     }
 
     if (event.toolName === "write" || event.toolName === "edit") {
+      const mutationText = getMutationText(event.toolName, event.input);
+      const credentialMatch = scanCredentials(mutationText);
+      if (credentialMatch) {
+        return blockToolCall(
+          `Blocked: Credential detected: '${credentialMatch}'. Remove it before writing.`,
+        );
+      }
+
       const canWrite = sm.canWrite();
       if (!canWrite.allowed) {
         return blockToolCall(
@@ -126,6 +127,32 @@ function getBashCommand(input: unknown): string {
 
   const maybeCommand = (input as { command?: unknown }).command;
   return typeof maybeCommand === "string" ? maybeCommand : "";
+}
+
+function getMutationText(toolName: string, input: unknown): string {
+  if (!input || typeof input !== "object") {
+    return "";
+  }
+
+  if (toolName === "write") {
+    const content = (input as { content?: unknown }).content;
+    return typeof content === "string" ? content : "";
+  }
+
+  const edits = (input as { edits?: unknown }).edits;
+  if (!Array.isArray(edits)) {
+    return "";
+  }
+
+  return edits
+    .map((edit) => {
+      if (!edit || typeof edit !== "object") {
+        return "";
+      }
+      const newText = (edit as { newText?: unknown }).newText;
+      return typeof newText === "string" ? newText : "";
+    })
+    .join("\n");
 }
 
 function toRaftAction(parsed: {

@@ -16,6 +16,13 @@ describe("parseRaftCommands", () => {
     expect(result[0].args.number).toBe("42");
   });
 
+  it("parses positional raft task claim id", () => {
+    const result = parseRaftCommands("raft task claim 42");
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({ noun: "task", verb: "claim" });
+    expect(result[0].args["0"]).toBe("42");
+  });
+
   it("parses raft task status command", () => {
     const result = parseRaftCommands("raft task status in_review 42");
     expect(result).toHaveLength(1);
@@ -28,6 +35,7 @@ describe("parseRaftCommands", () => {
     expect(result[0]).toMatchObject({ noun: "msg", verb: "post" });
     expect(result[0].args.channel).toBe("general");
     expect(result[0].args.thread).toBe("ts_123");
+    expect(result[0].args["0"]).toBe("hello world");
   });
 
   it("returns empty array for non-raft commands", () => {
@@ -121,7 +129,7 @@ describe("normalization: raft message → raft msg", () => {
     const result = parseRaftCommands('raft message send --target "#pi-raft" "hello"');
     expect(result).toHaveLength(1);
     expect(result[0]).toMatchObject({ noun: "msg", verb: "post" });
-    expect(result[0].args.target).toBe('"#pi-raft"');
+    expect(result[0].args.target).toBe("#pi-raft");
   });
 
   it("normalizes raft message check", () => {
@@ -140,6 +148,13 @@ describe("normalization: raft message → raft msg", () => {
     expect(result).toHaveLength(2);
     expect(result[0]).toMatchObject({ noun: "msg", verb: "read" });
     expect(result[1]).toMatchObject({ noun: "task", verb: "claim" });
+  });
+
+  it("parses raft message send with target and payload", () => {
+    const result = parseRaftCommands('raft message send --target "#general" "hello"');
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({ noun: "msg", verb: "post" });
+    expect(result[0].args.target).toBe("#general");
   });
 
   it("existing raft msg read still works unchanged", () => {

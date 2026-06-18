@@ -64,6 +64,48 @@ const RAFT_COMMAND_RE = /^\s*raft\s+(\w+)\s+(\w+)(.*)$/;
 function parseSegmentArgs(rawArgs: string): Record<string, string> {
   const args: Record<string, string> = {};
   let i = 0;
+  let positionalIndex = 0;
+
+  const normalizeValue = (value: string): string => {
+    if (value.length >= 2) {
+      const first = value[0];
+      const last = value[value.length - 1];
+      if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
+        return value.slice(1, -1);
+      }
+    }
+    return value;
+  };
+
+  const readToken = (start: number): { value: string; next: number } => {
+    let j = start;
+    let value = "";
+    let quote: "'" | '"' | null = null;
+
+    while (j < rawArgs.length && /\s/.test(rawArgs[j])) j++;
+
+    while (j < rawArgs.length) {
+      const ch = rawArgs[j];
+      if (quote) {
+        value += ch;
+        if (ch === quote) quote = null;
+        j++;
+        continue;
+      }
+      if (ch === "'" || ch === '"') {
+        quote = ch;
+        value += ch;
+        j++;
+        continue;
+      }
+      if (/\s/.test(ch)) break;
+      value += ch;
+      j++;
+    }
+
+    return { value, next: j };
+  };
+
   while (i < rawArgs.length) {
     // Skip leading whitespace
     while (i < rawArgs.length && /\s/.test(rawArgs[i])) i++;
@@ -78,24 +120,25 @@ function parseSegmentArgs(rawArgs: string): Record<string, string> {
         i++;
       }
       if (rawArgs[i] === "=") {
-        // Already in key=value form in raw text — just record known keys
-        args[key] = "true";
-        while (i < rawArgs.length && !/\s/.test(rawArgs[i])) i++;
+        i++;
+        const token = readToken(i);
+        args[key] = normalizeValue(token.value || "true");
+        i = token.next;
       } else {
         // Space-separated value
-        while (i < rawArgs.length && /\s/.test(rawArgs[i])) i++;
-        let value = "";
-        while (i < rawArgs.length && !/\s/.test(rawArgs[i])) {
-          value += rawArgs[i];
-          i++;
-        }
-        args[key] = value || "true";
+        const token = readToken(i);
+        args[key] = normalizeValue(token.value || "true");
+        i = token.next;
       }
       continue;
     }
 
-    // Positional argument — skip it
-    while (i < rawArgs.length && !/\s/.test(rawArgs[i])) i++;
+    const token = readToken(i);
+    if (token.value) {
+      args[String(positionalIndex)] = normalizeValue(token.value);
+      positionalIndex++;
+    }
+    i = token.next;
   }
   return args;
 }
@@ -110,7 +153,7 @@ function matchRaftCommand(segment: string): ParsedCommand | null {
   if (noun === "message") noun = "msg";
   if (noun !== "msg" && noun !== "task") return null;
 
-  if (noun === "msg" && verb === "send") verb = "post";
+  if (noun === "msg" && match[2] === "send") verb = "post";
 
   return {
     noun: noun as "msg" | "task",
