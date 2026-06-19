@@ -43,6 +43,14 @@ describe("parseRaftCommands", () => {
     expect(parseRaftCommands("find . -name '*.ts'")).toHaveLength(0);
   });
 
+  it("supports a configured raft command name", () => {
+    const result = parseRaftCommands("slock-raft msg read --channel general", {
+      raftCommand: "slock-raft",
+    });
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({ noun: "msg", verb: "read" });
+  });
+
   it("returns empty when raft appears inside quoted string", () => {
     expect(parseRaftCommands('echo "use raft to connect"')).toHaveLength(0);
     expect(parseRaftCommands("echo 'run: raft msg read'")).toHaveLength(0);

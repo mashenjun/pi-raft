@@ -1,4 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import piRaftExtension from "../extensions/index";
 import type { ActiveState } from "../extensions/state-machine";
@@ -7,13 +10,36 @@ type Handler = (event: any, ctx: any) => unknown | Promise<unknown>;
 
 interface Harness {
   appended: Array<{ type: "custom"; customType: string; data: unknown }>;
+  notifications: Array<{ message: string; type?: string }>;
   emit(eventName: string, event: Record<string, unknown>): Promise<any>;
 }
+
+let originalHome: string | undefined;
+let tempRoot: string;
+let testCwd: string;
+
+beforeEach(() => {
+  originalHome = process.env.HOME;
+  tempRoot = mkdtempSync(join(tmpdir(), "pi-raft-"));
+  testCwd = join(tempRoot, "cwd");
+  mkdirSync(testCwd, { recursive: true });
+  process.env.HOME = join(tempRoot, "home");
+});
+
+afterEach(() => {
+  if (originalHome === undefined) {
+    delete process.env.HOME;
+  } else {
+    process.env.HOME = originalHome;
+  }
+  rmSync(tempRoot, { recursive: true, force: true });
+});
 
 function createHarness(initialEntries: any[] = []): Harness {
   const handlers: Record<string, Handler[]> = {};
   const entries = [...initialEntries];
   const appended: Harness["appended"] = [];
+  const notifications: Harness["notifications"] = [];
 
   const pi = {
     on(eventName: string, handler: Handler) {
@@ -30,13 +56,20 @@ function createHarness(initialEntries: any[] = []): Harness {
   piRaftExtension(pi);
 
   const ctx = {
+    cwd: testCwd,
     sessionManager: {
       getEntries: () => entries,
+    },
+    ui: {
+      notify(message: string, type?: string) {
+        notifications.push({ message, type });
+      },
     },
   };
 
   return {
     appended,
+    notifications,
     async emit(eventName: string, event: Record<string, unknown>): Promise<any> {
       for (const handler of handlers[eventName] ?? []) {
         const result = await handler(event, ctx);
@@ -155,6 +188,19 @@ describe("pi-raft extension integration", () => {
     expect(editResult.reason).toContain("Credential detected");
   });
 
+  it("warns instead of blocking when strictMode is false", async () => {
+    mkdirSync(join(testCwd, ".pi"), { recursive: true });
+    writeFileSync(join(testCwd, ".pi", "pi-raft.json"), '{"strictMode":false}');
+    const harness = createHarness();
+
+    const result = await harness.emit("tool_call", write("console.log('early');"));
+
+    expect(result).toBeUndefined();
+    expect(harness.notifications).toHaveLength(1);
+    expect(harness.notifications[0]).toMatchObject({ type: "warning" });
+    expect(harness.notifications[0].message).toContain("msg read");
+  });
+
   it("allows non-raft chained shell commands", async () => {
     const harness = createHarness();
 
@@ -200,5 +246,38 @@ describe("pi-raft extension integration", () => {
     expect(result.systemPrompt).toContain("[Slock] State: IN_REVIEW");
     expect(result.systemPrompt).toContain("Task: #42");
     expect(await harness.emit("tool_call", write("console.log('resume');"))).toBeUndefined();
+  });
+
+  it("respects context injection config", async () => {
+    mkdirSync(join(testCwd, ".pi"), { recursive: true });
+    writeFileSync(
+      join(testCwd, ".pi", "pi-raft.json"),
+      '{"injectContext":true,"contextVerbosity":"full"}',
+    );
+    const harness = createHarness();
+
+    const result = await harness.emit("before_agent_start", {
+      type: "before_agent_start",
+      prompt: "continue",
+      systemPrompt: "base",
+      systemPromptOptions: {},
+    });
+
+    expect(result.systemPrompt).toContain("Slock Workflow Status:");
+  });
+
+  it("can disable context injection", async () => {
+    mkdirSync(join(testCwd, ".pi"), { recursive: true });
+    writeFileSync(join(testCwd, ".pi", "pi-raft.json"), '{"injectContext":false}');
+    const harness = createHarness();
+
+    const result = await harness.emit("before_agent_start", {
+      type: "before_agent_start",
+      prompt: "continue",
+      systemPrompt: "base",
+      systemPromptOptions: {},
+    });
+
+    expect(result).toBeUndefined();
   });
 });

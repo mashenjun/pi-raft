@@ -5,6 +5,10 @@ export interface ParsedCommand {
   rawSegment: string;
 }
 
+export interface ParseRaftCommandsOptions {
+  raftCommand?: string;
+}
+
 /**
  * Split a bash command string by shell chaining operators (&&, ;, ||),
  * respecting shell quoting rules (single quotes, double quotes).
@@ -58,8 +62,6 @@ function splitCommandsPreservingQuotes(input: string): string[] {
 
   return segments;
 }
-
-const RAFT_COMMAND_RE = /^\s*raft\s+(\w+)\s+(\w+)(.*)$/;
 
 function parseSegmentArgs(rawArgs: string): Record<string, string> {
   const args: Record<string, string> = {};
@@ -143,8 +145,13 @@ function parseSegmentArgs(rawArgs: string): Record<string, string> {
   return args;
 }
 
-function matchRaftCommand(segment: string): ParsedCommand | null {
-  const match = segment.match(RAFT_COMMAND_RE);
+function matchRaftCommand(
+  segment: string,
+  raftCommand = "raft",
+): ParsedCommand | null {
+  const match = segment.match(
+    new RegExp(`^\\s*${escapeRegExp(raftCommand)}\\s+(\\w+)\\s+(\\w+)(.*)$`),
+  );
   if (!match) return null;
 
   let noun = match[1];
@@ -163,9 +170,18 @@ function matchRaftCommand(segment: string): ParsedCommand | null {
   };
 }
 
-export function parseRaftCommands(bashCommand: string): ParsedCommand[] {
+export function parseRaftCommands(
+  bashCommand: string,
+  options: ParseRaftCommandsOptions = {},
+): ParsedCommand[] {
   const segments = splitCommandsPreservingQuotes(bashCommand);
-  return segments.map(matchRaftCommand).filter((c): c is ParsedCommand => c !== null);
+  return segments
+    .map((segment) => matchRaftCommand(segment, options.raftCommand))
+    .filter((c): c is ParsedCommand => c !== null);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 export function hasChainingOperators(bashCommand: string): boolean {

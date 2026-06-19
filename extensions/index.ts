@@ -1,4 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext, ToolCallEventResult } from "@earendil-works/pi-coding-agent";
+import { loadPiRaftConfig } from "./config";
+import type { PiRaftConfig } from "./config";
 import { scanCredentials } from "./credential-scanner";
 import {
   detectDuplicateCommand,
@@ -36,26 +39,34 @@ export default function (pi: ExtensionAPI): void {
     persistState();
   });
 
-  pi.on("tool_call", async (event, _ctx) => {
+  pi.on("tool_call", async (event, ctx) => {
+    const config = loadConfigForContext(ctx);
+
     if (event.toolName === "bash") {
       const command = getBashCommand(event.input);
       if (!command) {
         return;
       }
 
-      const credentialMatch = scanCredentials(command);
+      const credentialMatch = scanCredentials(command, config.credentialPatterns);
       if (credentialMatch) {
-        return blockToolCall(
+        return handleViolation(
+          config,
+          ctx,
           `Blocked: Credential detected: '${credentialMatch}'. Remove it before posting.`,
         );
       }
 
-      const raftCommands = parseRaftCommands(command);
-      if (raftCommands.length > 1) {
+      const raftCommands = parseRaftCommands(command, {
+        raftCommand: config.raftCommand,
+      });
+      if (raftCommands.length > config.maxRaftCommandsPerCall) {
         const reason = detectDuplicateCommand(raftCommands)
           ? "Duplicate raft command detected."
           : "Multiple raft commands in one call. Split them into separate calls.";
-        return blockToolCall(
+        return handleViolation(
+          config,
+          ctx,
           buildBlockMessage(
             reason,
             sm.snapshot().currentState,
@@ -69,7 +80,11 @@ export default function (pi: ExtensionAPI): void {
           const result = sm.transition(toRaftAction(parsed));
 
           if (!result.allowed) {
-            return blockToolCall(buildBlockMessage(result.reason, before.currentState));
+            return handleViolation(
+              config,
+              ctx,
+              buildBlockMessage(result.reason, before.currentState),
+            );
           }
 
           persistState();
@@ -89,16 +104,20 @@ export default function (pi: ExtensionAPI): void {
 
     if (event.toolName === "write" || event.toolName === "edit") {
       const mutationText = getMutationText(event.toolName, event.input);
-      const credentialMatch = scanCredentials(mutationText);
+      const credentialMatch = scanCredentials(mutationText, config.credentialPatterns);
       if (credentialMatch) {
-        return blockToolCall(
+        return handleViolation(
+          config,
+          ctx,
           `Blocked: Credential detected: '${credentialMatch}'. Remove it before writing.`,
         );
       }
 
       const canWrite = sm.canWrite();
       if (!canWrite.allowed) {
-        return blockToolCall(
+        return handleViolation(
+          config,
+          ctx,
           buildBlockMessage(
             canWrite.reason ?? "must claim a task first (raft task claim <task-id>)",
             sm.snapshot().currentState,
@@ -112,8 +131,13 @@ export default function (pi: ExtensionAPI): void {
     return;
   });
 
-  pi.on("before_agent_start", async (event, _ctx) => {
-    const context = buildSlockContext(sm.snapshot());
+  pi.on("before_agent_start", async (event, ctx) => {
+    const config = loadConfigForContext(ctx);
+    if (!config.injectContext) {
+      return;
+    }
+
+    const context = buildSlockContext(sm.snapshot(), config.contextVerbosity);
     return {
       systemPrompt: event.systemPrompt + "\n\n" + context,
     };
@@ -127,6 +151,14 @@ function getBashCommand(input: unknown): string {
 
   const maybeCommand = (input as { command?: unknown }).command;
   return typeof maybeCommand === "string" ? maybeCommand : "";
+}
+
+function loadConfigForContext(ctx: ExtensionContext): PiRaftConfig {
+  const result = loadPiRaftConfig({ cwd: ctx.cwd });
+  for (const warning of result.warnings) {
+    console.warn(`[pi-raft] config warning: ${warning}`);
+  }
+  return result.config;
 }
 
 function getMutationText(toolName: string, input: unknown): string {
@@ -172,6 +204,26 @@ function blockToolCall(reason: string): { block: true; reason: string } {
     block: true,
     reason,
   };
+}
+
+function handleViolation(
+  config: PiRaftConfig,
+  ctx: ExtensionContext,
+  reason: string,
+): ToolCallEventResult | undefined {
+  if (config.strictMode) {
+    return blockToolCall(reason);
+  }
+
+  ctx.ui.notify(toWarningMessage(reason), "warning");
+  return undefined;
+}
+
+function toWarningMessage(reason: string): string {
+  if (reason.startsWith("Blocked:")) {
+    return `Warning: ${reason.slice("Blocked:".length).trim()}`;
+  }
+  return `Warning: ${reason}`;
 }
 
 function buildBlockMessage(reason: string, currentState: SlockState): string {
