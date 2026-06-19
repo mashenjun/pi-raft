@@ -270,10 +270,14 @@ describe("pi-raft extension integration", () => {
       "bash --norc -c 'touch file.txt'",
       "env -i bash -lc 'touch file.txt'",
       "env -S 'touch file.txt'",
+      "env -S 'A=1 touch file.txt'",
+      "env -S '-i touch file.txt'",
       'env --split-string=\'bash -lc "touch file.txt"\'',
       "sudo -u root bash -lc 'touch file.txt'",
       "sudo -D /tmp bash -lc 'touch file.txt'",
       "sudo --chdir /tmp bash -lc 'touch file.txt'",
+      "sudo -k touch file.txt",
+      "sudo --reset-timestamp touch file.txt",
     ]) {
       const result = await harness.emit("tool_call", bash(command));
       expect(result).toMatchObject({ block: true });
@@ -318,6 +322,8 @@ describe("pi-raft extension integration", () => {
 
     expect(await harness.emit("tool_call", bash("sudo -l touch file.txt"))).toBeUndefined();
     expect(await harness.emit("tool_call", bash("sudo -v"))).toBeUndefined();
+    expect(await harness.emit("tool_call", bash("sudo -k"))).toBeUndefined();
+    expect(await harness.emit("tool_call", bash("sudo --reset-timestamp"))).toBeUndefined();
     expect(await harness.emit("tool_call", bash("sudo -K"))).toBeUndefined();
     expect(harness.appended).toHaveLength(0);
 
@@ -393,6 +399,15 @@ describe("pi-raft extension integration", () => {
       currentState: "IN_REVIEW",
       taskId: "42",
     });
+  });
+
+  it("does not advance state for raft words after a shell line continuation", async () => {
+    const harness = createHarness();
+
+    expect(
+      await harness.emit("tool_call", bash("echo \\\nraft msg read --channel general")),
+    ).toBeUndefined();
+    expect(harness.appended).toHaveLength(0);
   });
 
   it("allows shell file redirection after a task is claimed", async () => {
@@ -756,36 +771,38 @@ describe("pi-raft extension integration", () => {
   });
 
   it("resets stale state when a continuation prompt names a different bare task id", async () => {
-    const harness = createHarness([
-      {
-        type: "custom",
-        customType: "pi-raft-state",
-        data: {
-          currentState: "IN_REVIEW",
-          taskId: "42",
-          replyTarget: null,
+    for (const prompt of ["Continue #43", "Continue work on #43", "resume work on issue #43"]) {
+      const harness = createHarness([
+        {
+          type: "custom",
+          customType: "pi-raft-state",
+          data: {
+            currentState: "IN_REVIEW",
+            taskId: "42",
+            replyTarget: null,
+          },
         },
-      },
-    ]);
+      ]);
 
-    await harness.emit("session_start", { type: "session_start", reason: "reload" });
-    const promptResult = await harness.emit("before_agent_start", {
-      type: "before_agent_start",
-      prompt: "Continue #43",
-      systemPrompt: "base",
-      systemPromptOptions: {},
-    });
+      await harness.emit("session_start", { type: "session_start", reason: "reload" });
+      const promptResult = await harness.emit("before_agent_start", {
+        type: "before_agent_start",
+        prompt,
+        systemPrompt: "base",
+        systemPromptOptions: {},
+      });
 
-    expect(promptResult.systemPrompt).toContain("[Slock] State: IDLE");
-    expect(latestState(harness)).toMatchObject({
-      currentState: "IDLE",
-      taskId: null,
-      replyTarget: null,
-    });
+      expect(promptResult.systemPrompt).toContain("[Slock] State: IDLE");
+      expect(latestState(harness)).toMatchObject({
+        currentState: "IDLE",
+        taskId: null,
+        replyTarget: null,
+      });
 
-    const result = await harness.emit("tool_call", write("console.log('wrong task');"));
-    expect(result).toMatchObject({ block: true });
-    expect(result.reason).toContain("msg read");
+      const result = await harness.emit("tool_call", write("console.log('wrong task');"));
+      expect(result).toMatchObject({ block: true });
+      expect(result.reason).toContain("msg read");
+    }
   });
 
   it("resets stale state when a prompt mentions the old task but assigns a new task", async () => {

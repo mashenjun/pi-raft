@@ -397,7 +397,8 @@ function taskIdsMentioned(text: string): string[] {
 function continuationBareTaskIdsMentioned(text: string): string[] {
   const ids = new Set<string>();
   const continuation = String.raw`\b(?:continue|resume|keep working|carry on|same task)\b`;
-  for (const match of text.matchAll(new RegExp(`${continuation}(?:\\s+(?:on|with|task|the|this))*\\s*#(\\d+)(?!\\d)`, "g"))) {
+  const connector = String.raw`(?:on|with|for|task|ticket|issue|work|the|this|current|same|github|gh|pr)`;
+  for (const match of text.matchAll(new RegExp(`${continuation}(?:\\s+${connector}){0,8}\\s*#(\\d+)(?!\\d)`, "g"))) {
     ids.add(match[1]);
   }
   return [...ids];
@@ -410,7 +411,7 @@ function detectShellMutation(command: string, depth = 0): string | null {
 
   if (depth < 3) {
     for (const splitStringCommand of envSplitStringCommands(command)) {
-      const splitStringMutation = detectShellMutation(splitStringCommand, depth + 1);
+      const splitStringMutation = detectShellMutation(`env ${splitStringCommand}`, depth + 1);
       if (splitStringMutation) {
         return splitStringMutation;
       }
@@ -697,7 +698,7 @@ function skipSudoPrefix(words: string[], start: number): number {
 
 function sudoOptionStopsExecution(word: string): boolean {
   const option = word.split("=", 1)[0];
-  return /^(?:--(?:list|validate|reset-timestamp|remove-timestamp|version|help)|-[^-]*[lvkKV])$/
+  return /^(?:--(?:list|validate|remove-timestamp|version|help)|-[^-]*[lvKV])$/
     .test(option);
 }
 

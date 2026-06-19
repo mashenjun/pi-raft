@@ -10,8 +10,8 @@ export interface ParseRaftCommandsOptions {
 }
 
 /**
- * Split a bash command string by shell chaining operators (&&, ;, ||, newline),
- * respecting shell quoting rules (single quotes, double quotes).
+ * Split a bash command string by shell chaining operators (&&, ;, ||,
+ * unescaped newline), respecting shell quoting rules.
  */
 function splitCommandsPreservingQuotes(input: string): string[] {
   const segments: string[] = [];
@@ -31,6 +31,12 @@ function splitCommandsPreservingQuotes(input: string): string[] {
     if (ch === '"' && !inSingle) {
       inDouble = !inDouble;
       current += ch;
+      continue;
+    }
+
+    if (!inSingle && ch === "\\" && (next === "\n" || next === "\r")) {
+      if (next === "\r" && input[i + 2] === "\n") i += 2;
+      else i++;
       continue;
     }
 
@@ -198,6 +204,11 @@ export function hasChainingOperators(bashCommand: string): boolean {
     const ch = bashCommand[i];
     if (ch === "'" && !inDouble) { inSingle = !inSingle; continue; }
     if (ch === '"' && !inSingle) { inDouble = !inDouble; continue; }
+    if (!inSingle && ch === "\\" && (bashCommand[i + 1] === "\n" || bashCommand[i + 1] === "\r")) {
+      if (bashCommand[i + 1] === "\r" && bashCommand[i + 2] === "\n") i += 2;
+      else i++;
+      continue;
+    }
     if (!inSingle && !inDouble) {
       if (ch === "&" && bashCommand[i + 1] === "&") return true;
       if (ch === "|" && bashCommand[i + 1] === "|") return true;
