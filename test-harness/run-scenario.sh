@@ -78,7 +78,7 @@ write_a_happy_path_result() {
     {
       "type": "tool_call",
       "tool": "bash",
-      "command": "raft task status in_review 42",
+      "command": "raft task update --number 42 --status in_review",
       "blocked": false
     },
     {
@@ -189,7 +189,7 @@ write_c_cross_turn_result() {
     {
       "type": "tool_call",
       "tool": "bash",
-      "command": "raft task status in_review 42",
+      "command": "raft task update --number 42 --status in_review",
       "blocked": false,
       "turn": 1
     },

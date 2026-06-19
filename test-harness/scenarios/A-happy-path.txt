@@ -11,7 +11,7 @@ Expected events:
 4. write/edit before task claim is blocked.
 5. raft task claim 42 is allowed.
 6. state transitions to TASK_CLAIMED with taskId 42.
-7. raft task status in_review 42 is allowed.
+7. raft task update --number 42 --status in_review is allowed.
 8. state transitions to IN_REVIEW.
 9. write/edit is allowed.
 10. raft msg post --channel general --thread ts_abc "done" is allowed.

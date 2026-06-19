@@ -46,25 +46,60 @@ describe("StateMachine transitions", () => {
       if (result.allowed) expect(result.newState).toBe("MESSAGES_READ");
     });
 
-    it("blocks raft task status from MESSAGES_READ", () => {
+    it("allows raft task status as a read-only no-op from MESSAGES_READ", () => {
       const sm = createStateMachine();
       sm.transition({ noun: "msg", verb: "read", args: {} });
       const result = sm.transition({ noun: "task", verb: "status", args: {} });
-      expect(result.allowed).toBe(false);
-      if (!result.allowed) {
-        expect(result.reason).toContain("must claim a task first");
-      }
+      expect(result.allowed).toBe(true);
+      if (result.allowed) expect(result.newState).toBe("MESSAGES_READ");
     });
   });
 
   describe("TASK_CLAIMED state", () => {
-    it("allows raft task status → IN_REVIEW", () => {
+    it("allows raft task update --status in_review → IN_REVIEW", () => {
       const sm = createStateMachine();
       sm.transition({ noun: "msg", verb: "read", args: {} });
       sm.transition({ noun: "task", verb: "claim", args: { number: "42" } });
-      const result = sm.transition({ noun: "task", verb: "status", args: {} });
+      const result = sm.transition({
+        noun: "task",
+        verb: "update",
+        args: { number: "42", status: "in_review" },
+      });
       expect(result.allowed).toBe(true);
       if (result.allowed) expect(result.newState).toBe("IN_REVIEW");
+    });
+
+    it("does not move to IN_REVIEW for raft task status --help", () => {
+      const sm = createStateMachine();
+      sm.transition({ noun: "msg", verb: "read", args: {} });
+      sm.transition({ noun: "task", verb: "claim", args: { number: "42" } });
+      const result = sm.transition({ noun: "task", verb: "status", args: { help: "true" } });
+      expect(result.allowed).toBe(true);
+      if (result.allowed) expect(result.newState).toBe("TASK_CLAIMED");
+      expect(sm.currentState).toBe("TASK_CLAIMED");
+    });
+
+    it("does not move to IN_REVIEW for raft task update --help", () => {
+      const sm = createStateMachine();
+      sm.transition({ noun: "msg", verb: "read", args: {} });
+      sm.transition({ noun: "task", verb: "claim", args: { number: "42" } });
+      const result = sm.transition({ noun: "task", verb: "update", args: { help: "true" } });
+      expect(result.allowed).toBe(true);
+      if (result.allowed) expect(result.newState).toBe("TASK_CLAIMED");
+      expect(sm.currentState).toBe("TASK_CLAIMED");
+    });
+
+    it("blocks raft task update --status done from TASK_CLAIMED", () => {
+      const sm = createStateMachine();
+      sm.transition({ noun: "msg", verb: "read", args: {} });
+      sm.transition({ noun: "task", verb: "claim", args: { number: "42" } });
+      const result = sm.transition({
+        noun: "task",
+        verb: "update",
+        args: { number: "42", status: "done" },
+      });
+      expect(result.allowed).toBe(false);
+      expect(sm.currentState).toBe("TASK_CLAIMED");
     });
 
     it("blocks raft msg post from TASK_CLAIMED", () => {
@@ -84,7 +119,7 @@ describe("StateMachine transitions", () => {
       const sm = createStateMachine();
       sm.transition({ noun: "msg", verb: "read", args: {} });
       sm.transition({ noun: "task", verb: "claim", args: { number: "42" } });
-      sm.transition({ noun: "task", verb: "status", args: {} });
+      sm.transition({ noun: "task", verb: "update", args: { status: "in_review" } });
       const result = sm.transition({ noun: "msg", verb: "post", args: {} });
       expect(result.allowed).toBe(true);
       if (result.allowed) expect(result.newState).toBe("DONE");
@@ -94,7 +129,7 @@ describe("StateMachine transitions", () => {
       const sm = createStateMachine();
       sm.transition({ noun: "msg", verb: "read", args: {} });
       sm.transition({ noun: "task", verb: "claim", args: { number: "42" } });
-      sm.transition({ noun: "task", verb: "status", args: {} });
+      sm.transition({ noun: "task", verb: "update", args: { status: "in_review" } });
       sm.transition({
         noun: "msg",
         verb: "post",
@@ -109,7 +144,7 @@ describe("StateMachine transitions", () => {
       const sm = createStateMachine();
       sm.transition({ noun: "msg", verb: "read", args: {} });
       sm.transition({ noun: "task", verb: "claim", args: { number: "42" } });
-      sm.transition({ noun: "task", verb: "status", args: {} });
+      sm.transition({ noun: "task", verb: "update", args: { status: "in_review" } });
       sm.transition({ noun: "msg", verb: "post", args: {} });
       expect(sm.currentState).toBe("DONE");
 
@@ -148,7 +183,7 @@ describe("canWrite", () => {
     const sm = createStateMachine();
     sm.transition({ noun: "msg", verb: "read", args: {} });
     sm.transition({ noun: "task", verb: "claim", args: { number: "42" } });
-    sm.transition({ noun: "task", verb: "status", args: {} });
+    sm.transition({ noun: "task", verb: "update", args: { status: "in_review" } });
     const result = sm.canWrite();
     expect(result.allowed).toBe(true);
   });

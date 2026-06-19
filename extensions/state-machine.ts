@@ -7,7 +7,7 @@ export interface RaftAction {
 }
 
 export type TransitionResult =
-  | { allowed: true; newState: SlockState; taskId?: string }
+  | { allowed: true; newState: SlockState; taskId?: string; changed?: boolean }
   | { allowed: false; reason: string };
 
 export interface ActiveState {
@@ -28,32 +28,6 @@ export interface StateMachine {
   snapshot(): ActiveState;
 }
 
-const VALID_TRANSITIONS: Record<
-  SlockState,
-  { noun: string; verb: string; nextState: SlockState }[]
-> = {
-  IDLE: [
-    { noun: "msg", verb: "read", nextState: "MESSAGES_READ" },
-  ],
-  MESSAGES_READ: [
-    { noun: "msg", verb: "read", nextState: "MESSAGES_READ" },
-    { noun: "task", verb: "claim", nextState: "TASK_CLAIMED" },
-  ],
-  TASK_CLAIMED: [
-    { noun: "msg", verb: "read", nextState: "TASK_CLAIMED" },
-    { noun: "task", verb: "status", nextState: "IN_REVIEW" },
-  ],
-  IN_REVIEW: [
-    { noun: "msg", verb: "read", nextState: "IN_REVIEW" },
-    { noun: "task", verb: "status", nextState: "IN_REVIEW" },
-    { noun: "msg", verb: "post", nextState: "DONE" },
-  ],
-  DONE: [
-    { noun: "msg", verb: "read", nextState: "IDLE" },
-    { noun: "task", verb: "status", nextState: "DONE" },
-  ],
-};
-
 export function createStateMachine(initial?: ActiveState): StateMachine {
   let state: ActiveState = initial ?? {
     currentState: "IDLE",
@@ -67,29 +41,34 @@ export function createStateMachine(initial?: ActiveState): StateMachine {
     get replyTarget() { return state.replyTarget; },
 
     transition(action: RaftAction): TransitionResult {
-      const allowed = VALID_TRANSITIONS[state.currentState];
+      if (isReadOnlyAction(action)) {
+        return {
+          allowed: true,
+          newState: state.currentState,
+          taskId: state.taskId ?? undefined,
+          changed: false,
+        };
+      }
 
-      for (const t of allowed) {
-        if (t.noun === action.noun && t.verb === action.verb) {
-          const prev = state.currentState;
-          state.currentState = t.nextState;
+      const nextState = nextStateFor(state.currentState, action);
+      if (nextState) {
+        state.currentState = nextState;
 
-          if (action.noun === "task" && action.verb === "claim") {
-            state.taskId = action.args.number ?? action.args["0"] ?? null;
-          }
-          if (action.noun === "msg" && action.verb === "post") {
-            state.replyTarget = {
-              channel: action.args.channel ?? "",
-              threadTs: action.args.thread,
-            };
-          }
-          if (t.nextState === "IDLE") {
-            state.taskId = null;
-            state.replyTarget = null;
-          }
-
-          return { allowed: true, newState: state.currentState, taskId: state.taskId ?? undefined };
+        if (action.noun === "task" && action.verb === "claim") {
+          state.taskId = action.args.number ?? action.args["0"] ?? null;
         }
+        if (action.noun === "msg" && action.verb === "post") {
+          state.replyTarget = {
+            channel: action.args.channel ?? "",
+            threadTs: action.args.thread,
+          };
+        }
+        if (nextState === "IDLE") {
+          state.taskId = null;
+          state.replyTarget = null;
+        }
+
+        return { allowed: true, newState: state.currentState, taskId: state.taskId ?? undefined };
       }
 
       return {
@@ -124,15 +103,62 @@ export function createStateMachine(initial?: ActiveState): StateMachine {
   return sm;
 }
 
+function nextStateFor(currentState: SlockState, action: RaftAction): SlockState | null {
+  switch (currentState) {
+    case "IDLE":
+      if (isMsgRead(action)) return "MESSAGES_READ";
+      return null;
+    case "MESSAGES_READ":
+      if (isMsgRead(action)) return "MESSAGES_READ";
+      if (isTaskClaim(action)) return "TASK_CLAIMED";
+      return null;
+    case "TASK_CLAIMED":
+      if (isMsgRead(action)) return "TASK_CLAIMED";
+      if (isTaskUpdateInReview(action)) return "IN_REVIEW";
+      return null;
+    case "IN_REVIEW":
+      if (isMsgRead(action)) return "IN_REVIEW";
+      if (isTaskUpdateInReview(action)) return "IN_REVIEW";
+      if (isMsgPost(action)) return "DONE";
+      return null;
+    case "DONE":
+      if (isMsgRead(action)) return "IDLE";
+      return null;
+  }
+}
+
+function isMsgRead(action: RaftAction): boolean {
+  return action.noun === "msg" && action.verb === "read";
+}
+
+function isMsgPost(action: RaftAction): boolean {
+  return action.noun === "msg" && action.verb === "post";
+}
+
+function isTaskClaim(action: RaftAction): boolean {
+  return action.noun === "task" && action.verb === "claim";
+}
+
+function isTaskUpdateInReview(action: RaftAction): boolean {
+  return action.noun === "task" &&
+    action.verb === "update" &&
+    action.args.status === "in_review";
+}
+
+function isReadOnlyAction(action: RaftAction): boolean {
+  if (action.args.help === "true") return true;
+  return action.noun === "task" && action.verb === "status";
+}
+
 function buildBlockReason(currentState: SlockState, action: RaftAction): string {
   if (currentState === "IDLE") {
     return `must read messages first (raft msg read) before ${action.noun} ${action.verb}`;
   }
-  if (currentState === "MESSAGES_READ" && action.noun === "task" && action.verb === "status") {
+  if (currentState === "MESSAGES_READ" && action.noun === "task") {
     return "must claim a task first (raft task claim <id>)";
   }
   if (currentState === "TASK_CLAIMED" && action.noun === "msg" && action.verb === "post") {
-    return "must set task status to in_review before posting (raft task status in_review)";
+    return "must set task status to in_review before posting (raft task update --status in_review)";
   }
   return `invalid transition from ${currentState}: ${action.noun} ${action.verb}`;
 }

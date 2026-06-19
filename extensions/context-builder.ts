@@ -70,7 +70,7 @@ function nextActionHint(state: SlockState): string | null {
     case "MESSAGES_READ":
       return "raft task claim <task-id>";
     case "TASK_CLAIMED":
-      return "raft task status in_review <task-id>";
+      return "raft task update --number <task-id> --status in_review";
     case "IN_REVIEW":
       return 'raft msg post --channel <channel> --thread <ts> "your reply"';
     case "DONE":

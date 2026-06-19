@@ -23,7 +23,8 @@ installed. For focused live behavior probes, use
   itself (or a dedicated benchmark repo). No stubs, no simulated file operations.
 - **Real GitHub operations**: issues tracked on GitHub, PRs opened, CI checks run.
 - **Full slock workflow required**: every task must go through `raft msg read` →
-  `raft task claim` → `raft task status in_review` → work → `raft msg post`.
+  `raft task claim` → `raft task update --status in_review` → work →
+  `raft msg post`.
 - **Measurable outcomes**: each task has a verifiable acceptance criterion
   (test passes, feature works, PR merges).
 - **Separate ownership**: classify failures as pi-raft enforcement defects,
@@ -147,7 +148,7 @@ For each benchmark run, tasks follow this lifecycle:
 4. pi-raft enforcement begins:
    a. Agent runs: raft msg read --channel <channel>
    b. Agent runs: raft task claim <N>
-   c. Agent runs: raft task status in_review <N>
+   c. Agent runs: raft task update --number <N> --status in_review
    d. Agent reads issue, explores codebase, implements solution
    e. Agent writes code, runs tests, iterates
    f. Agent creates git commit, pushes branch, opens PR
@@ -271,8 +272,9 @@ cp docs/experiments/pik-behavior-result-template.json \
 A key metric: does the agent learn the slock workflow over successive tasks?
 
 After completing Task 1, the agent should have internalized the pattern
-(read → claim → status → work → post). Task 2-5 should show progressively
-fewer blocks. The `blocks_encountered` metric across tasks measures this.
+(read → claim → update status → work → post). Task 2-5 should show
+progressively fewer blocks. The `blocks_encountered` metric across tasks
+measures this.
 
 Expected trend:
 

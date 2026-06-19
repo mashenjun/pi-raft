@@ -496,7 +496,7 @@ Scenario G — Run <N>
 From #pi-agent-observe, in order:
   [ ] raft message read
   [ ] raft task claim
-  [ ] raft task status in_review
+  [ ] raft task update --status in_review
   [ ] write/edit file
   [ ] raft message send
 
@@ -530,7 +530,7 @@ Failure Catalog
 | ID  | Description | Scenarios | Frequency | Evidence |
 |-----|-------------|-----------|-----------|----------|
 | F1  | Agent writes files before raft task claim       | A, B, G | X/Y runs | observe: write ts < claim ts |
-| F2  | Agent skips raft task status in_review           | A, B, D, G | X/Y runs | observe: no status command |
+| F2  | Agent skips raft task update --status in_review  | A, B, D, G | X/Y runs | observe: no status update command |
 | F3  | Agent replies to main channel instead of thread  | C       | X/Y runs | public: target mismatch |
 | F4  | Agent forgets claimed task after pause           | D       | X/Y runs | observe: re-claims or claims different task |
 | F5  | Agent chains multiple raft commands in one call  | G       | X/Y runs | observe: single entry with multiple raft |
