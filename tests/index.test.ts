@@ -269,7 +269,11 @@ describe("pi-raft extension integration", () => {
       "bash -lc 'echo data > file.txt'",
       "bash --norc -c 'touch file.txt'",
       "env -i bash -lc 'touch file.txt'",
+      "env -S 'touch file.txt'",
+      'env --split-string=\'bash -lc "touch file.txt"\'',
       "sudo -u root bash -lc 'touch file.txt'",
+      "sudo -D /tmp bash -lc 'touch file.txt'",
+      "sudo --chdir /tmp bash -lc 'touch file.txt'",
     ]) {
       const result = await harness.emit("tool_call", bash(command));
       expect(result).toMatchObject({ block: true });
@@ -285,9 +289,11 @@ describe("pi-raft extension integration", () => {
     for (const command of [
       "git restore README.md",
       "git clean -fd",
+      "git -C repo clean -fd",
       "git reset --hard",
       "git checkout -- README.md",
       "git checkout main",
+      "git -C repo checkout main",
       "git switch feature",
     ]) {
       const result = await harness.emit("tool_call", bash(command));
@@ -303,7 +309,21 @@ describe("pi-raft extension integration", () => {
 
     expect(await harness.emit("tool_call", bash("git clean -nd"))).toBeUndefined();
     expect(await harness.emit("tool_call", bash("git clean --dry-run -d"))).toBeUndefined();
+    expect(await harness.emit("tool_call", bash("git -C repo clean -nd"))).toBeUndefined();
     expect(harness.appended).toHaveLength(0);
+  });
+
+  it("allows non-executing sudo modes before the claim gate", async () => {
+    const harness = createHarness();
+
+    expect(await harness.emit("tool_call", bash("sudo -l touch file.txt"))).toBeUndefined();
+    expect(await harness.emit("tool_call", bash("sudo -v"))).toBeUndefined();
+    expect(await harness.emit("tool_call", bash("sudo -K"))).toBeUndefined();
+    expect(harness.appended).toHaveLength(0);
+
+    const result = await harness.emit("tool_call", bash("sudo -u root touch file.txt"));
+    expect(result).toMatchObject({ block: true });
+    expect(result.reason).toContain("shell file mutation");
   });
 
   it("blocks tar extraction before the claim gate", async () => {
@@ -330,6 +350,40 @@ describe("pi-raft extension integration", () => {
     const result = await harness.emit(
       "tool_call",
       bash("raft msg read --channel general && echo data > file.txt"),
+    );
+
+    expect(result).toMatchObject({ block: true });
+    expect(result.reason).toContain("clears the active claim");
+    expect(harness.appended).toHaveLength(appendCount);
+    expect(latestState(harness)).toMatchObject({
+      currentState: "IN_REVIEW",
+      taskId: "42",
+    });
+
+    const newlineResult = await harness.emit(
+      "tool_call",
+      bash("raft msg read --channel general\necho data > file.txt"),
+    );
+
+    expect(newlineResult).toMatchObject({ block: true });
+    expect(newlineResult.reason).toContain("clears the active claim");
+    expect(harness.appended).toHaveLength(appendCount);
+    expect(latestState(harness)).toMatchObject({
+      currentState: "IN_REVIEW",
+      taskId: "42",
+    });
+  });
+
+  it("blocks shell mutations after intermediate raft commands that clear the active claim", async () => {
+    mkdirSync(join(testCwd, ".pi"), { recursive: true });
+    writeFileSync(join(testCwd, ".pi", "pi-raft.json"), '{"maxRaftCommandsPerCall":3}');
+    const harness = createHarness();
+    await reachInReview(harness);
+    const appendCount = harness.appended.length;
+
+    const result = await harness.emit(
+      "tool_call",
+      bash("raft msg read --channel general && echo data > file.txt && raft task claim 43"),
     );
 
     expect(result).toMatchObject({ block: true });
@@ -646,6 +700,35 @@ describe("pi-raft extension integration", () => {
     }
   });
 
+  it("resets DONE state for fresh prompts containing completion verbs", async () => {
+    const harness = createHarness([
+      {
+        type: "custom",
+        customType: "pi-raft-state",
+        data: {
+          currentState: "DONE",
+          taskId: "42",
+          replyTarget: { channel: "general", threadTs: "ts_abc" },
+        },
+      },
+    ]);
+
+    await harness.emit("session_start", { type: "session_start", reason: "reload" });
+    const promptResult = await harness.emit("before_agent_start", {
+      type: "before_agent_start",
+      prompt: "Update README",
+      systemPrompt: "base",
+      systemPromptOptions: {},
+    });
+
+    expect(promptResult.systemPrompt).toContain("[Slock] State: IDLE");
+    expect(latestState(harness)).toMatchObject({
+      currentState: "IDLE",
+      taskId: null,
+      replyTarget: null,
+    });
+  });
+
   it("ignores unrelated bare issue numbers during same-task continuation", async () => {
     const harness = createHarness([
       {
@@ -670,6 +753,39 @@ describe("pi-raft extension integration", () => {
     expect(promptResult.systemPrompt).toContain("[Slock] State: IN_REVIEW");
     expect(promptResult.systemPrompt).toContain("Task: #42");
     expect(await harness.emit("tool_call", write("console.log('same task');"))).toBeUndefined();
+  });
+
+  it("resets stale state when a continuation prompt names a different bare task id", async () => {
+    const harness = createHarness([
+      {
+        type: "custom",
+        customType: "pi-raft-state",
+        data: {
+          currentState: "IN_REVIEW",
+          taskId: "42",
+          replyTarget: null,
+        },
+      },
+    ]);
+
+    await harness.emit("session_start", { type: "session_start", reason: "reload" });
+    const promptResult = await harness.emit("before_agent_start", {
+      type: "before_agent_start",
+      prompt: "Continue #43",
+      systemPrompt: "base",
+      systemPromptOptions: {},
+    });
+
+    expect(promptResult.systemPrompt).toContain("[Slock] State: IDLE");
+    expect(latestState(harness)).toMatchObject({
+      currentState: "IDLE",
+      taskId: null,
+      replyTarget: null,
+    });
+
+    const result = await harness.emit("tool_call", write("console.log('wrong task');"));
+    expect(result).toMatchObject({ block: true });
+    expect(result.reason).toContain("msg read");
   });
 
   it("resets stale state when a prompt mentions the old task but assigns a new task", async () => {

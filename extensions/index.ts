@@ -243,9 +243,12 @@ function raftActionsClearWriteGate(actions: RaftAction[], sm: StateMachine): boo
     if (!result.allowed) {
       return false;
     }
+    if (!preview.canWrite().allowed) {
+      return true;
+    }
   }
 
-  return !preview.canWrite().allowed;
+  return false;
 }
 
 function blockToolCall(reason: string): { block: true; reason: string } {
@@ -369,7 +372,8 @@ function hasFreshWorkIntent(text: string, taskId: string | null): boolean {
 
 function isApprovalCompletionPrompt(text: string): boolean {
   return /\b(?:approved|approve|approval|looks good|lgtm|ok|okay)\b/.test(text) ||
-    /\b(?:mark|set|update|close|complete|done)\b/.test(text);
+    /\b(?:mark|set|update|close)\b.{0,30}\b(?:done|complete|completed|closed)\b/.test(text) ||
+    /\b(?:complete|close)\s+(?:the\s+)?(?:task|ticket|issue|work)\b/.test(text);
 }
 
 function mentionsTaskId(text: string, taskId: string): boolean {
@@ -378,12 +382,22 @@ function mentionsTaskId(text: string, taskId: string): boolean {
 }
 
 function mentionsDifferentTaskId(text: string, taskId: string): boolean {
-  return taskIdsMentioned(text).some((mentionedTaskId) => mentionedTaskId !== taskId);
+  const ids = new Set([...taskIdsMentioned(text), ...continuationBareTaskIdsMentioned(text)]);
+  return [...ids].some((mentionedTaskId) => mentionedTaskId !== taskId);
 }
 
 function taskIdsMentioned(text: string): string[] {
   const ids = new Set<string>();
   for (const match of text.matchAll(/\btask\s*#?(\d+)(?!\d)/g)) {
+    ids.add(match[1]);
+  }
+  return [...ids];
+}
+
+function continuationBareTaskIdsMentioned(text: string): string[] {
+  const ids = new Set<string>();
+  const continuation = String.raw`\b(?:continue|resume|keep working|carry on|same task)\b`;
+  for (const match of text.matchAll(new RegExp(`${continuation}(?:\\s+(?:on|with|task|the|this))*\\s*#(\\d+)(?!\\d)`, "g"))) {
     ids.add(match[1]);
   }
   return [...ids];
@@ -395,6 +409,13 @@ function detectShellMutation(command: string, depth = 0): string | null {
   }
 
   if (depth < 3) {
+    for (const splitStringCommand of envSplitStringCommands(command)) {
+      const splitStringMutation = detectShellMutation(splitStringCommand, depth + 1);
+      if (splitStringMutation) {
+        return splitStringMutation;
+      }
+    }
+
     for (const nestedCommand of nestedShellCommands(command)) {
       const nestedMutation = detectShellMutation(nestedCommand, depth + 1);
       if (nestedMutation) {
@@ -634,7 +655,11 @@ function executableWordIndex(words: string[]): number {
   while (i < words.length) {
     const word = words[i];
     if (word === "sudo") {
-      i = skipSudoPrefix(words, i + 1);
+      const next = skipSudoPrefix(words, i + 1);
+      if (next === -1) {
+        return -1;
+      }
+      i = next;
       continue;
     }
     if (word === "env") {
@@ -656,6 +681,9 @@ function skipSudoPrefix(words: string[], start: number): number {
     if (!word.startsWith("-") || word === "-") {
       return i;
     }
+    if (sudoOptionStopsExecution(word)) {
+      return -1;
+    }
 
     const option = word.split("=", 1)[0];
     const hasInlineValue = word.includes("=");
@@ -667,8 +695,14 @@ function skipSudoPrefix(words: string[], start: number): number {
   return i;
 }
 
+function sudoOptionStopsExecution(word: string): boolean {
+  const option = word.split("=", 1)[0];
+  return /^(?:--(?:list|validate|reset-timestamp|remove-timestamp|version|help)|-[^-]*[lvkKV])$/
+    .test(option);
+}
+
 function sudoOptionNeedsValue(option: string): boolean {
-  return /^(?:-[ughpCTrU]|--(?:user|group|host|prompt|close-from|command-timeout|type|role|other-user))$/
+  return /^(?:-[ughpCTrUDR]|--(?:user|group|host|prompt|close-from|command-timeout|type|role|other-user|chdir|chroot))$/
     .test(option);
 }
 
@@ -700,6 +734,68 @@ function skipEnvPrefix(words: string[], start: number): number {
 function envOptionNeedsValue(option: string): boolean {
   return /^(?:-[uCS]|--(?:unset|chdir|split-string|argv0|block-signal|default-signal|ignore-signal))$/
     .test(option);
+}
+
+function envSplitStringCommands(command: string): string[] {
+  const payloads: string[] = [];
+  for (const stage of splitShellStages(command)) {
+    const words = shellWords(stage);
+    const envIndex = envWordIndex(words);
+    if (envIndex === -1) {
+      continue;
+    }
+    collectEnvSplitStringPayloads(words, envIndex + 1, payloads);
+  }
+  return payloads;
+}
+
+function envWordIndex(words: string[]): number {
+  let i = 0;
+  while (i < words.length) {
+    if (words[i] === "sudo") {
+      const next = skipSudoPrefix(words, i + 1);
+      if (next === -1) return -1;
+      i = next;
+      continue;
+    }
+    return words[i] === "env" ? i : -1;
+  }
+  return -1;
+}
+
+function collectEnvSplitStringPayloads(words: string[], start: number, payloads: string[]): void {
+  let i = start;
+  while (i < words.length) {
+    const word = words[i];
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) {
+      i++;
+      continue;
+    }
+    if (word === "--") {
+      return;
+    }
+    if (!word.startsWith("-") || word === "-") {
+      return;
+    }
+
+    if (word === "-S" || word === "--split-string") {
+      if (i + 1 < words.length) {
+        payloads.push(words[i + 1]);
+      }
+      return;
+    }
+    if (word.startsWith("--split-string=")) {
+      payloads.push(word.slice("--split-string=".length));
+      return;
+    }
+
+    const option = word.split("=", 1)[0];
+    const hasInlineValue = word.includes("=");
+    i++;
+    if (envOptionNeedsValue(option) && !hasInlineValue && i < words.length) {
+      i++;
+    }
+  }
 }
 
 function isShellExecutable(word: string): boolean {
@@ -764,23 +860,57 @@ function isMutatingGitSegment(segment: string): boolean {
     return false;
   }
 
-  const subcommand = words[1];
+  const subcommandIndex = gitSubcommandIndex(words);
+  if (subcommandIndex === -1) {
+    return false;
+  }
+
+  const subcommand = words[subcommandIndex];
   if (subcommand === "apply" || subcommand === "checkout-index" || subcommand === "restore") {
     return true;
   }
   if (subcommand === "clean") {
-    return !words.slice(2).some(isGitDryRunOption);
+    return !words.slice(subcommandIndex + 1).some(isGitDryRunOption);
   }
   if (subcommand === "reset") {
-    return words.slice(2).includes("--hard");
+    return words.slice(subcommandIndex + 1).includes("--hard");
   }
   if (subcommand === "checkout") {
-    return words.length > 2 && !words.slice(2).some(isHelpOption);
+    return words.length > subcommandIndex + 1 && !words.slice(subcommandIndex + 1).some(isHelpOption);
   }
   if (subcommand === "switch") {
-    return words.length > 2 && !words.slice(2).some(isHelpOption);
+    return words.length > subcommandIndex + 1 && !words.slice(subcommandIndex + 1).some(isHelpOption);
   }
   return false;
+}
+
+function gitSubcommandIndex(words: string[]): number {
+  let i = 1;
+  while (i < words.length) {
+    const word = words[i];
+    if (word === "--") {
+      return i + 1 < words.length ? i + 1 : -1;
+    }
+    if (!word.startsWith("-") || word === "-") {
+      return i;
+    }
+    if (/^-[Cc].+/.test(word)) {
+      i++;
+      continue;
+    }
+
+    const option = word.split("=", 1)[0];
+    const hasInlineValue = word.includes("=");
+    i++;
+    if (gitGlobalOptionNeedsValue(option) && !hasInlineValue && i < words.length) {
+      i++;
+    }
+  }
+  return -1;
+}
+
+function gitGlobalOptionNeedsValue(option: string): boolean {
+  return /^(?:-[Cc]|--(?:git-dir|work-tree|namespace|config-env|super-prefix))$/.test(option);
 }
 
 function isGitDryRunOption(word: string): boolean {

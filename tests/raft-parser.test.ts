@@ -76,6 +76,13 @@ describe("parseRaftCommands", () => {
     expect(result[0]).toMatchObject({ noun: "msg", verb: "read" });
   });
 
+  it("splits chained commands with newlines", () => {
+    const result = parseRaftCommands("raft msg read --channel general\necho done\nraft task claim 42");
+    expect(result).toHaveLength(2);
+    expect(result[0]).toMatchObject({ noun: "msg", verb: "read" });
+    expect(result[1]).toMatchObject({ noun: "task", verb: "claim" });
+  });
+
   it("handles real-world F1 example", () => {
     const result = parseRaftCommands(
       "raft task claim --number 8 && raft task update --number 8 --status in_review"
@@ -111,6 +118,10 @@ describe("hasChainingOperators", () => {
 
   it("detects || operator", () => {
     expect(hasChainingOperators("raft msg read || echo fail")).toBe(true);
+  });
+
+  it("detects newline separators", () => {
+    expect(hasChainingOperators("raft msg read\nraft task claim")).toBe(true);
   });
 
   it("returns false for single command", () => {

@@ -10,7 +10,7 @@ export interface ParseRaftCommandsOptions {
 }
 
 /**
- * Split a bash command string by shell chaining operators (&&, ;, ||),
+ * Split a bash command string by shell chaining operators (&&, ;, ||, newline),
  * respecting shell quoting rules (single quotes, double quotes).
  */
 function splitCommandsPreservingQuotes(input: string): string[] {
@@ -50,6 +50,12 @@ function splitCommandsPreservingQuotes(input: string): string[] {
       if (ch === ";") {
         segments.push(current.trim());
         current = "";
+        continue;
+      }
+      if (ch === "\n" || ch === "\r") {
+        segments.push(current.trim());
+        current = "";
+        if (ch === "\r" && next === "\n") i++;
         continue;
       }
     }
@@ -185,7 +191,7 @@ function escapeRegExp(value: string): string {
 }
 
 export function hasChainingOperators(bashCommand: string): boolean {
-  // Strip quoted strings first, then check for && or ; outside quotes
+  // Strip quoted strings first, then check for chaining separators outside quotes.
   let inSingle = false;
   let inDouble = false;
   for (let i = 0; i < bashCommand.length; i++) {
@@ -196,6 +202,7 @@ export function hasChainingOperators(bashCommand: string): boolean {
       if (ch === "&" && bashCommand[i + 1] === "&") return true;
       if (ch === "|" && bashCommand[i + 1] === "|") return true;
       if (ch === ";") return true;
+      if (ch === "\n" || ch === "\r") return true;
     }
   }
   return false;
