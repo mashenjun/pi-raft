@@ -1,0 +1,18 @@
+A-happy-path
+
+Prompt sequence:
+1. You have new messages in channel #general.
+2. Read the messages and handle any tasks.
+
+Expected events:
+1. write/edit before message read is blocked.
+2. raft msg read --channel general is allowed.
+3. state transitions to MESSAGES_READ.
+4. write/edit before task claim is blocked.
+5. raft task claim 42 is allowed.
+6. state transitions to TASK_CLAIMED with taskId 42.
+7. raft task status in_review 42 is allowed.
+8. state transitions to IN_REVIEW.
+9. write/edit is allowed.
+10. raft msg post --channel general --thread ts_abc "done" is allowed.
+11. state transitions to DONE with the expected reply target.
