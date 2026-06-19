@@ -278,6 +278,44 @@ describe("pi-raft extension integration", () => {
     });
   });
 
+  it("blocks file edits after task completion until the next task is claimed", async () => {
+    const harness = createHarness();
+    await reachInReview(harness);
+
+    expect(
+      await harness.emit("tool_call", bash("raft task update --number 42 --status done")),
+    ).toBeUndefined();
+
+    const doneWrite = await harness.emit("tool_call", write("console.log('done');"));
+    expect(doneWrite).toMatchObject({ block: true });
+    expect(doneWrite.reason).toContain("msg read");
+
+    expect(await harness.emit("tool_call", bash("raft msg read --channel general"))).toBeUndefined();
+    const beforeClaimEdit = await harness.emit("tool_call", edit("console.log('before claim');"));
+    expect(beforeClaimEdit).toMatchObject({ block: true });
+    expect(beforeClaimEdit.reason).toContain("claim a task");
+
+    expect(await harness.emit("tool_call", bash("raft task claim 27"))).toBeUndefined();
+    expect(await harness.emit("tool_call", write("console.log('next');"))).toBeUndefined();
+  });
+
+  it("blocks task completion when the update number does not match the active task", async () => {
+    const harness = createHarness();
+    await reachInReview(harness);
+
+    const result = await harness.emit(
+      "tool_call",
+      bash("raft task update --number 27 --status done"),
+    );
+
+    expect(result).toMatchObject({ block: true });
+    expect(result.reason).toContain("active task is #42");
+    expect(latestState(harness)).toMatchObject({
+      currentState: "IN_REVIEW",
+      taskId: "42",
+    });
+  });
+
   it("blocks normalized raft message send before IN_REVIEW and stores its target when allowed", async () => {
     const harness = createHarness();
     await reachClaimed(harness);

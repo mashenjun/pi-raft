@@ -48,7 +48,8 @@ IDLE ──raft msg read──► MESSAGES_READ ──raft task claim──► T
 
 **Re-reading messages:** You can run `raft msg read` from any state. It never blocks.
 From `DONE`, it starts the next task cycle and moves to `MESSAGES_READ`.
-`raft task list` and `raft task status` are read-only no-ops in every state.
+`raft task list`, `raft task status`, and `raft msg check` are read-only
+no-ops in every state.
 
 ## State Reference
 
@@ -79,6 +80,9 @@ pi-raft intercepts your tool calls and prevents these violations:
 ```bash
 # Read messages in a channel
 raft msg read --channel <channel-name>
+
+# Check for messages without changing workflow state
+raft msg check --channel <channel-name>
 
 # Post a reply in a thread
 raft msg post --channel <channel> --thread <thread-ts> "your message"

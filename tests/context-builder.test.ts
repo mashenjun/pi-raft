@@ -17,7 +17,7 @@ describe("buildSlockContext — compact", () => {
     expect(ctx).toContain("[Slock]");
     expect(ctx).toContain("State: IDLE");
     expect(ctx).toContain("raft msg read");
-    expect(ctx).toContain("claim assigned review/analysis tasks");
+    expect(ctx).toContain("claim assigned review/analysis/investigation tasks");
   });
 
   it("formats TASK_CLAIMED with taskId", () => {

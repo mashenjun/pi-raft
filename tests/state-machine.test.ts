@@ -149,6 +149,24 @@ describe("StateMachine transitions", () => {
       expect(sm.replyTarget).toBeNull();
     });
 
+    it("blocks raft task update --status done for a different active task", () => {
+      const sm = createStateMachine();
+      sm.transition({ noun: "msg", verb: "read", args: {} });
+      sm.transition({ noun: "task", verb: "claim", args: { number: "42" } });
+      sm.transition({ noun: "task", verb: "update", args: { status: "in_review" } });
+
+      const result = sm.transition({
+        noun: "task",
+        verb: "update",
+        args: { number: "27", status: "done" },
+      });
+
+      expect(result.allowed).toBe(false);
+      if (!result.allowed) expect(result.reason).toContain("active task is #42");
+      expect(sm.currentState).toBe("IN_REVIEW");
+      expect(sm.taskId).toBe("42");
+    });
+
     it("allows raft msg post → DONE", () => {
       const sm = createStateMachine();
       sm.transition({ noun: "msg", verb: "read", args: {} });
@@ -341,6 +359,19 @@ describe("canWrite", () => {
     sm.transition({ noun: "task", verb: "update", args: { status: "in_review" } });
     const result = sm.canWrite();
     expect(result.allowed).toBe(true);
+  });
+
+  it("blocks writes from DONE until the next task cycle", () => {
+    const sm = createStateMachine();
+    sm.transition({ noun: "msg", verb: "read", args: {} });
+    sm.transition({ noun: "task", verb: "claim", args: { number: "42" } });
+    sm.transition({ noun: "task", verb: "update", args: { status: "in_review" } });
+    sm.transition({ noun: "task", verb: "update", args: { status: "done" } });
+
+    const result = sm.canWrite();
+
+    expect(result.allowed).toBe(false);
+    expect(result.reason).toContain("msg read");
   });
 });
 

@@ -26,7 +26,7 @@ function buildCompact(state: ActiveState): string {
     parts.push(`| Next: ${hint}`);
   }
 
-  parts.push("| Policy: claim assigned review/analysis tasks");
+  parts.push("| Policy: claim assigned review/analysis/investigation tasks");
 
   return parts.join(" ");
 }

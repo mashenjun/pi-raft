@@ -51,6 +51,13 @@ export function createStateMachine(initial?: ActiveState): StateMachine {
       }
 
       const previousState = state.currentState;
+      if (isMismatchedTaskUpdateDone(state, action)) {
+        return {
+          allowed: false,
+          reason: `task update done targets #${taskNumberFor(action)} but active task is #${state.taskId}`,
+        };
+      }
+
       const nextState = nextStateFor(state.currentState, action);
       if (nextState) {
         state.currentState = nextState;
@@ -82,6 +89,9 @@ export function createStateMachine(initial?: ActiveState): StateMachine {
       }
       if (state.currentState === "MESSAGES_READ") {
         return { allowed: false, reason: "must claim a task first (raft task claim <id>)" };
+      }
+      if (state.currentState === "DONE") {
+        return { allowed: false, reason: "must read messages first (raft msg read)" };
       }
       return { allowed: true };
     },
@@ -150,6 +160,16 @@ function isTaskUpdateDone(action: RaftAction): boolean {
   return action.noun === "task" &&
     action.verb === "update" &&
     action.args.status === "done";
+}
+
+function isMismatchedTaskUpdateDone(state: ActiveState, action: RaftAction): boolean {
+  if (!isTaskUpdateDone(action) || !state.taskId) return false;
+  const taskNumber = taskNumberFor(action);
+  return taskNumber !== null && taskNumber !== state.taskId;
+}
+
+function taskNumberFor(action: RaftAction): string | null {
+  return action.args.number ?? action.args["0"] ?? null;
 }
 
 function isReadOnlyAction(action: RaftAction): boolean {

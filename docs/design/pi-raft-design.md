@@ -163,13 +163,14 @@ IDLE ──raft msg read──► MESSAGES_READ ──raft task claim──► T
 
 **Enforcement rules:**
 
-- **Write files (`write`, `edit`)**: blocked unless state >= `TASK_CLAIMED`
+- **Write files (`write`, `edit`)**: allowed only in `TASK_CLAIMED` or
+  `IN_REVIEW`
 - **`raft` commands that modify state**: parsed from bash; transitions
   validated against current state
 - **`raft task claim` without prior `raft msg read`**: blocked
 - **`raft msg post` without prior `raft task update --status in_review`**: blocked
-- **Read-only task inspection** (`raft task list`, `raft task status`): allowed
-  as no-op transitions from every state
+- **Read-only inspection** (`raft task list`, `raft task status`,
+  `raft msg check`): allowed as no-op transitions from every state
 
 **Post semantics:**
 
@@ -687,9 +688,9 @@ esac
    enforcement runs in `tool_call`, before the CLI exits. pi-raft validates the
    command shape and intended transition, not the eventual slock result. This is
    why state transitions must be conservative: read-only commands like
-   `raft task status --help` are no-ops, and `IN_REVIEW` only follows the real
-   mutating command `raft task update --status in_review`. Confirmed-success
-   synchronization would require a future post-execution hook.
+   `raft task status --help` and `raft msg check` are no-ops, and `IN_REVIEW`
+   only follows the real mutating command `raft task update --status in_review`.
+   Confirmed-success synchronization would require a future post-execution hook.
 
 5. **How to handle the auto-claim race condition (P12)?** Experiment E R2-R3
    showed the agent claims tasks within seconds of creation, before the tester
