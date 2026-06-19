@@ -223,6 +223,82 @@ describe("pi-raft extension integration", () => {
     expect(harness.appended).toHaveLength(0);
   });
 
+  it("blocks raft commands with shell mutations before the claim gate", async () => {
+    const harness = createHarness();
+
+    const chainedResult = await harness.emit(
+      "tool_call",
+      bash("raft msg read --channel general && echo data > file.txt"),
+    );
+    expect(chainedResult).toMatchObject({ block: true });
+    expect(chainedResult.reason).toContain("shell file redirection");
+    expect(chainedResult.reason).toContain("msg read");
+    expect(harness.appended).toHaveLength(0);
+
+    const redirectedResult = await harness.emit(
+      "tool_call",
+      bash("raft msg read --channel general > file.txt"),
+    );
+    expect(redirectedResult).toMatchObject({ block: true });
+    expect(redirectedResult.reason).toContain("shell file redirection");
+    expect(redirectedResult.reason).toContain("msg read");
+    expect(harness.appended).toHaveLength(0);
+  });
+
+  it("blocks tee after a pipe before the claim gate", async () => {
+    const harness = createHarness();
+
+    const result = await harness.emit("tool_call", bash("echo data | tee file.txt"));
+
+    expect(result).toMatchObject({ block: true });
+    expect(result.reason).toContain("shell file mutation");
+    expect(result.reason).toContain("msg read");
+    expect(harness.appended).toHaveLength(0);
+  });
+
+  it("blocks nested shell writes before the claim gate", async () => {
+    const harness = createHarness();
+
+    const result = await harness.emit("tool_call", bash("bash -lc 'echo data > file.txt'"));
+
+    expect(result).toMatchObject({ block: true });
+    expect(result.reason).toContain("shell file redirection");
+    expect(result.reason).toContain("msg read");
+    expect(harness.appended).toHaveLength(0);
+  });
+
+  it("blocks worktree-mutating git commands before the claim gate", async () => {
+    const harness = createHarness();
+
+    for (const command of [
+      "git restore README.md",
+      "git clean -fd",
+      "git reset --hard",
+      "git checkout -- README.md",
+    ]) {
+      const result = await harness.emit("tool_call", bash(command));
+      expect(result).toMatchObject({ block: true });
+      expect(result.reason).toContain("shell file mutation");
+      expect(result.reason).toContain("msg read");
+    }
+    expect(harness.appended).toHaveLength(0);
+  });
+
+  it("blocks tar extraction before the claim gate", async () => {
+    const harness = createHarness();
+
+    for (const command of [
+      "tar -xzf archive.tgz",
+      "tar xf archive.tar",
+    ]) {
+      const result = await harness.emit("tool_call", bash(command));
+      expect(result).toMatchObject({ block: true });
+      expect(result.reason).toContain("shell file mutation");
+      expect(result.reason).toContain("msg read");
+    }
+    expect(harness.appended).toHaveLength(0);
+  });
+
   it("allows shell file redirection after a task is claimed", async () => {
     const harness = createHarness();
     await reachClaimed(harness);
@@ -466,6 +542,126 @@ describe("pi-raft extension integration", () => {
     );
     expect(writeResult).toMatchObject({ block: true });
     expect(writeResult.reason).toContain("msg read");
+  });
+
+  it("preserves post-reply approval prompts so the task can be marked done", async () => {
+    const harness = createHarness([
+      {
+        type: "custom",
+        customType: "pi-raft-state",
+        data: {
+          currentState: "DONE",
+          taskId: "42",
+          replyTarget: { channel: "general", threadTs: "ts_abc" },
+        },
+      },
+    ]);
+
+    await harness.emit("session_start", { type: "session_start", reason: "reload" });
+    const promptResult = await harness.emit("before_agent_start", {
+      type: "before_agent_start",
+      prompt: "Approved, mark done",
+      systemPrompt: "base",
+      systemPromptOptions: {},
+    });
+    expect(promptResult.systemPrompt).toContain("[Slock] State: DONE");
+    expect(promptResult.systemPrompt).toContain("Task: #42");
+
+    expect(
+      await harness.emit("tool_call", bash("raft task update --number 42 --status done")),
+    ).toBeUndefined();
+    expect(latestState(harness)).toMatchObject({
+      currentState: "DONE",
+      taskId: null,
+      replyTarget: null,
+    });
+  });
+
+  it("resets stale state when a prompt mentions the old task but assigns a new task", async () => {
+    const harness = createHarness([
+      {
+        type: "custom",
+        customType: "pi-raft-state",
+        data: {
+          currentState: "IN_REVIEW",
+          taskId: "42",
+          replyTarget: null,
+        },
+      },
+    ]);
+
+    await harness.emit("session_start", { type: "session_start", reason: "reload" });
+    const promptResult = await harness.emit("before_agent_start", {
+      type: "before_agent_start",
+      prompt: "Stop work on task #42 and handle task #43.",
+      systemPrompt: "base",
+      systemPromptOptions: {},
+    });
+
+    expect(promptResult.systemPrompt).toContain("[Slock] State: IDLE");
+    expect(latestState(harness)).toMatchObject({
+      currentState: "IDLE",
+      taskId: null,
+      replyTarget: null,
+    });
+  });
+
+  it("requires a task-id boundary before preserving stale state", async () => {
+    const harness = createHarness([
+      {
+        type: "custom",
+        customType: "pi-raft-state",
+        data: {
+          currentState: "IN_REVIEW",
+          taskId: "4",
+          replyTarget: null,
+        },
+      },
+    ]);
+
+    await harness.emit("session_start", { type: "session_start", reason: "reload" });
+    const promptResult = await harness.emit("before_agent_start", {
+      type: "before_agent_start",
+      prompt: "Task #43 needs a fresh fix.",
+      systemPrompt: "base",
+      systemPromptOptions: {},
+    });
+
+    expect(promptResult.systemPrompt).toContain("[Slock] State: IDLE");
+    expect(latestState(harness)).toMatchObject({
+      currentState: "IDLE",
+      taskId: null,
+      replyTarget: null,
+    });
+  });
+
+  it("does not treat negated continuation wording as a continuation", async () => {
+    const harness = createHarness([
+      {
+        type: "custom",
+        customType: "pi-raft-state",
+        data: {
+          currentState: "IN_REVIEW",
+          taskId: "42",
+          replyTarget: null,
+        },
+      },
+    ]);
+
+    await harness.emit("session_start", { type: "session_start", reason: "reload" });
+    const promptResult = await harness.emit("before_agent_start", {
+      type: "before_agent_start",
+      prompt: "Do not continue the previous task; start the new ticket.",
+      systemPrompt: "base",
+      systemPromptOptions: {},
+    });
+
+    expect(promptResult.systemPrompt).toContain("[Slock] State: IDLE");
+    expect(latestState(harness)).toMatchObject({
+      currentState: "IDLE",
+      taskId: null,
+      replyTarget: null,
+    });
   });
 
   it("blocks stale prior-task completion after claiming the next task", async () => {
