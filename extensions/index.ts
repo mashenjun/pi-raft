@@ -361,6 +361,9 @@ function hasFreshWorkIntent(text: string, taskId: string | null): boolean {
   if (/\b(?:do not|don't|dont|never)\s+(?:continue|resume|keep working|carry on)\b/.test(text)) {
     return true;
   }
+  if (taskId !== null && mentionsRejectedTaskId(text, taskId)) {
+    return true;
+  }
   if (/\b(?:start|begin|handle|work on|switch to|move to)\b.{0,40}\b(?:new|fresh|next|different|another)\b/.test(text)) {
     return true;
   }
@@ -368,6 +371,15 @@ function hasFreshWorkIntent(text: string, taskId: string | null): boolean {
     return true;
   }
   return taskId !== null && mentionsDifferentTaskId(text, taskId);
+}
+
+function mentionsRejectedTaskId(text: string, taskId: string): boolean {
+  const escaped = taskId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const oldTaskPattern = String.raw`(?:task\s*#?${escaped}|#${escaped})(?!\d)`;
+  return new RegExp(String.raw`\b(?:ignore|stop|drop|abandon|discard|cancel)\b.{0,30}${oldTaskPattern}`)
+    .test(text) ||
+    new RegExp(String.raw`${oldTaskPattern}.{0,30}\b(?:ignore|stop|drop|abandon|discard|cancel)\b`)
+      .test(text);
 }
 
 function isApprovalCompletionPrompt(text: string): boolean {
@@ -405,11 +417,14 @@ function continuationBareTaskIdsMentioned(text: string): string[] {
 }
 
 function detectShellMutation(command: string, depth = 0): string | null {
-  if (hasFileOutputRedirection(command)) {
-    return "shell file redirection";
-  }
-
   if (depth < 3) {
+    for (const substitutionCommand of shellSubstitutionCommands(command)) {
+      const substitutionMutation = detectShellMutation(substitutionCommand, depth + 1);
+      if (substitutionMutation) {
+        return substitutionMutation;
+      }
+    }
+
     for (const splitStringCommand of envSplitStringCommands(command)) {
       const splitStringMutation = detectShellMutation(`env ${splitStringCommand}`, depth + 1);
       if (splitStringMutation) {
@@ -425,9 +440,12 @@ function detectShellMutation(command: string, depth = 0): string | null {
     }
   }
 
-  const stripped = stripQuotedText(command);
-  for (const segment of splitShellSegments(stripped)) {
-    if (isMutatingShellSegment(segment)) {
+  if (hasFileOutputRedirection(command)) {
+    return "shell file redirection";
+  }
+
+  for (const segment of splitShellSegments(command)) {
+    if (isMutatingShellSegment(segment, depth)) {
       return "shell file mutation";
     }
   }
@@ -435,27 +453,113 @@ function detectShellMutation(command: string, depth = 0): string | null {
   return null;
 }
 
-function stripQuotedText(input: string): string {
-  let result = "";
+function shellSubstitutionCommands(input: string): string[] {
+  const commands: string[] = [];
   let inSingle = false;
   let inDouble = false;
 
   for (let i = 0; i < input.length; i++) {
     const ch = input[i];
+    const next = input[i + 1] ?? "";
+
+    if (ch === "\\" && !inSingle) {
+      i++;
+      continue;
+    }
     if (ch === "'" && !inDouble) {
       inSingle = !inSingle;
-      result += " ";
       continue;
     }
     if (ch === '"' && !inSingle) {
       inDouble = !inDouble;
-      result += " ";
       continue;
     }
-    result += inSingle || inDouble ? " " : ch;
+    if (inSingle) {
+      continue;
+    }
+
+    if (ch === "$" && next === "(" && input[i + 2] !== "(") {
+      const parsed = readParenthesized(input, i + 1);
+      if (parsed) {
+        commands.push(parsed.body);
+        i = parsed.end;
+      }
+      continue;
+    }
+    if ((ch === "<" || ch === ">") && next === "(") {
+      const parsed = readParenthesized(input, i + 1);
+      if (parsed) {
+        commands.push(parsed.body);
+        i = parsed.end;
+      }
+      continue;
+    }
+    if (ch === "`") {
+      const parsed = readBacktickSubstitution(input, i);
+      if (parsed) {
+        commands.push(parsed.body);
+        i = parsed.end;
+      }
+    }
   }
 
-  return result;
+  return commands;
+}
+
+function readParenthesized(input: string, openIndex: number): { body: string; end: number } | null {
+  let depth = 1;
+  let quote: "'" | '"' | null = null;
+
+  for (let i = openIndex + 1; i < input.length; i++) {
+    const ch = input[i];
+    if (quote) {
+      if (ch === "\\" && quote === '"' && i + 1 < input.length) {
+        i++;
+        continue;
+      }
+      if (ch === quote) {
+        quote = null;
+      }
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      continue;
+    }
+    if (ch === "\\" && i + 1 < input.length) {
+      i++;
+      continue;
+    }
+    if (ch === "(") {
+      depth++;
+      continue;
+    }
+    if (ch === ")") {
+      depth--;
+      if (depth === 0) {
+        return { body: input.slice(openIndex + 1, i), end: i };
+      }
+    }
+  }
+
+  return null;
+}
+
+function readBacktickSubstitution(input: string, start: number): { body: string; end: number } | null {
+  let body = "";
+  for (let i = start + 1; i < input.length; i++) {
+    const ch = input[i];
+    if (ch === "\\" && i + 1 < input.length) {
+      i++;
+      body += input[i];
+      continue;
+    }
+    if (ch === "`") {
+      return { body, end: i };
+    }
+    body += ch;
+  }
+  return null;
 }
 
 function hasFileOutputRedirection(command: string): boolean {
@@ -655,7 +759,7 @@ function executableWordIndex(words: string[]): number {
   let i = 0;
   while (i < words.length) {
     const word = words[i];
-    if (word === "sudo") {
+    if (commandBaseName(word) === "sudo") {
       const next = skipSudoPrefix(words, i + 1);
       if (next === -1) {
         return -1;
@@ -663,7 +767,7 @@ function executableWordIndex(words: string[]): number {
       i = next;
       continue;
     }
-    if (word === "env") {
+    if (commandBaseName(word) === "env") {
       i = skipEnvPrefix(words, i + 1);
       continue;
     }
@@ -686,12 +790,7 @@ function skipSudoPrefix(words: string[], start: number): number {
       return -1;
     }
 
-    const option = word.split("=", 1)[0];
-    const hasInlineValue = word.includes("=");
-    i++;
-    if (sudoOptionNeedsValue(option) && !hasInlineValue && i < words.length) {
-      i++;
-    }
+    i = skipSudoOption(words, i);
   }
   return i;
 }
@@ -702,9 +801,37 @@ function sudoOptionStopsExecution(word: string): boolean {
     .test(option);
 }
 
-function sudoOptionNeedsValue(option: string): boolean {
-  return /^(?:-[ughpCTrUDR]|--(?:user|group|host|prompt|close-from|command-timeout|type|role|other-user|chdir|chroot))$/
+function skipSudoOption(words: string[], index: number): number {
+  const word = words[index];
+  if (word.startsWith("--")) {
+    const option = word.split("=", 1)[0];
+    const hasInlineValue = word.includes("=");
+    let next = index + 1;
+    if (sudoLongOptionNeedsValue(option) && !hasInlineValue && next < words.length) {
+      next++;
+    }
+    return next;
+  }
+
+  if (/^-[^-]\S*$/.test(word)) {
+    const chars = word.slice(1);
+    for (let pos = 0; pos < chars.length; pos++) {
+      if (sudoShortOptionNeedsValue(chars[pos])) {
+        return pos < chars.length - 1 ? index + 1 : Math.min(index + 2, words.length);
+      }
+    }
+  }
+
+  return index + 1;
+}
+
+function sudoLongOptionNeedsValue(option: string): boolean {
+  return /^(?:--(?:user|group|host|prompt|close-from|command-timeout|type|role|other-user|chdir|chroot))$/
     .test(option);
+}
+
+function sudoShortOptionNeedsValue(option: string): boolean {
+  return "ughpCTrUDR".includes(option);
 }
 
 function skipEnvPrefix(words: string[], start: number): number {
@@ -722,19 +849,42 @@ function skipEnvPrefix(words: string[], start: number): number {
       return i;
     }
 
-    const option = word.split("=", 1)[0];
-    const hasInlineValue = word.includes("=");
-    i++;
-    if (envOptionNeedsValue(option) && !hasInlineValue && i < words.length) {
-      i++;
-    }
+    i = skipEnvOption(words, i);
   }
   return i;
 }
 
-function envOptionNeedsValue(option: string): boolean {
-  return /^(?:-[uCS]|--(?:unset|chdir|split-string|argv0|block-signal|default-signal|ignore-signal))$/
+function skipEnvOption(words: string[], index: number): number {
+  const word = words[index];
+  if (word.startsWith("--")) {
+    const option = word.split("=", 1)[0];
+    const hasInlineValue = word.includes("=");
+    let next = index + 1;
+    if (envLongOptionNeedsValue(option) && !hasInlineValue && next < words.length) {
+      next++;
+    }
+    return next;
+  }
+
+  if (/^-[^-]\S*$/.test(word)) {
+    const chars = word.slice(1);
+    for (let pos = 0; pos < chars.length; pos++) {
+      if (envShortOptionNeedsValue(chars[pos])) {
+        return pos < chars.length - 1 ? index + 1 : Math.min(index + 2, words.length);
+      }
+    }
+  }
+
+  return index + 1;
+}
+
+function envLongOptionNeedsValue(option: string): boolean {
+  return /^(?:--(?:unset|chdir|split-string|argv0|block-signal|default-signal|ignore-signal))$/
     .test(option);
+}
+
+function envShortOptionNeedsValue(option: string): boolean {
+  return "uCS".includes(option);
 }
 
 function envSplitStringCommands(command: string): string[] {
@@ -790,17 +940,16 @@ function collectEnvSplitStringPayloads(words: string[], start: number, payloads:
       return;
     }
 
-    const option = word.split("=", 1)[0];
-    const hasInlineValue = word.includes("=");
-    i++;
-    if (envOptionNeedsValue(option) && !hasInlineValue && i < words.length) {
-      i++;
-    }
+    i = skipEnvOption(words, i);
   }
 }
 
 function isShellExecutable(word: string): boolean {
-  return /^(?:bash|sh|zsh)$/.test(word.replace(/^.*\//, ""));
+  return /^(?:bash|sh|zsh)$/.test(commandBaseName(word));
+}
+
+function commandBaseName(word: string): string {
+  return word.replace(/^.*\//, "");
 }
 
 function shellWords(input: string): string[] {
@@ -842,17 +991,76 @@ function shellWords(input: string): string[] {
   return words;
 }
 
-function isMutatingShellSegment(segment: string): boolean {
+function isMutatingShellSegment(segment: string, depth = 0): boolean {
   const words = shellWords(segment);
   const commandIndex = executableWordIndex(words);
   const normalized = commandIndex === -1 ? "" : words.slice(commandIndex).join(" ");
-  return /^(?:touch|mkdir|mv|cp|rm|chmod|chown|install|tee)\b/.test(normalized) ||
-    /^sed\s+-[A-Za-z]*i[A-Za-z]*\b/.test(normalized) ||
+  return isSudoEditSegment(segment) ||
+    /^(?:touch|mkdir|mv|cp|rm|chmod|chown|install|tee)\b/.test(normalized) ||
+    isSedInPlaceSegment(normalized) ||
     /^perl\s+-[A-Za-z]*i[A-Za-z]*\b/.test(normalized) ||
     isMutatingGitSegment(normalized) ||
-    /^(?:npm|pnpm|bun|yarn)\s+(?:install|add|remove|update)\b/.test(normalized) ||
+    isMutatingPackageManagerSegment(normalized) ||
     isTarExtractionSegment(normalized) ||
+    isPatchSegment(normalized) ||
+    isMutatingFindSegment(normalized, depth) ||
     /^unzip\b/.test(normalized);
+}
+
+function isSudoEditSegment(segment: string): boolean {
+  const words = shellWords(segment);
+  let i = 0;
+  while (i < words.length && commandBaseName(words[i]) === "env") {
+    i = skipEnvPrefix(words, i + 1);
+  }
+  if (commandBaseName(words[i]) === "sudoedit") {
+    return !words.slice(i + 1).some(isHelpOption);
+  }
+  if (commandBaseName(words[i]) !== "sudo") {
+    return false;
+  }
+
+  i++;
+  while (i < words.length) {
+    const word = words[i];
+    if (word === "--") {
+      return false;
+    }
+    if (!word.startsWith("-") || word === "-") {
+      return false;
+    }
+    if (word === "--edit" || word.startsWith("--edit=")) {
+      return true;
+    }
+    if (word.startsWith("--")) {
+      i = skipSudoOption(words, i);
+      continue;
+    }
+    if (/^-[^-]\S*$/.test(word) && word.slice(1).includes("e")) {
+      return true;
+    }
+    i = skipSudoOption(words, i);
+  }
+  return false;
+}
+
+function isSedInPlaceSegment(segment: string): boolean {
+  const words = shellWords(segment);
+  if (commandBaseName(words[0] ?? "") !== "sed") {
+    return false;
+  }
+  for (const word of words.slice(1)) {
+    if (word === "--") {
+      return false;
+    }
+    if (word === "--in-place" || word.startsWith("--in-place=")) {
+      return true;
+    }
+    if (/^-[^-]\S*$/.test(word) && word.slice(1).includes("i")) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function isMutatingGitSegment(segment: string): boolean {
@@ -869,6 +1077,10 @@ function isMutatingGitSegment(segment: string): boolean {
   const subcommand = words[subcommandIndex];
   if (subcommand === "apply" || subcommand === "checkout-index" || subcommand === "restore") {
     return true;
+  }
+  if (subcommand === "rm" || subcommand === "mv") {
+    const args = words.slice(subcommandIndex + 1);
+    return !args.some(isGitDryRunOption) && !args.some(isHelpOption);
   }
   if (subcommand === "clean") {
     return !words.slice(subcommandIndex + 1).some(isGitDryRunOption);
@@ -921,6 +1133,59 @@ function isGitDryRunOption(word: string): boolean {
 
 function isHelpOption(word: string): boolean {
   return word === "--help" || word === "-h";
+}
+
+function isMutatingPackageManagerSegment(segment: string): boolean {
+  const words = shellWords(segment);
+  const executable = commandBaseName(words[0] ?? "");
+  if (!/^(?:npm|pnpm|bun|yarn)$/.test(executable) || words.length < 2) {
+    return false;
+  }
+  if (words.slice(1).some(isPackageDryRunOption)) {
+    return false;
+  }
+  return /^(?:install|i|ci|add|remove|rm|uninstall|update|up)$/.test(words[1]);
+}
+
+function isPackageDryRunOption(word: string): boolean {
+  return word === "--dry-run" || word.startsWith("--dry-run=");
+}
+
+function isPatchSegment(segment: string): boolean {
+  const words = shellWords(segment);
+  if (commandBaseName(words[0] ?? "") !== "patch") {
+    return false;
+  }
+  return !words.slice(1).some((word) => isHelpOption(word) || word === "--version" || word === "--dry-run");
+}
+
+function isMutatingFindSegment(segment: string, depth: number): boolean {
+  const words = shellWords(segment);
+  if (commandBaseName(words[0] ?? "") !== "find") {
+    return false;
+  }
+  for (let i = 1; i < words.length; i++) {
+    const word = words[i];
+    if (/^-f(?:ls|print|print0|printf)$/.test(word) || word === "-delete") {
+      return true;
+    }
+    if (word === "-exec" || word === "-execdir" || word === "-ok" || word === "-okdir") {
+      const payload: string[] = [];
+      i++;
+      while (i < words.length && !isFindExecTerminator(words[i])) {
+        payload.push(words[i]);
+        i++;
+      }
+      if (payload.length > 0 && depth < 3 && detectShellMutation(payload.join(" "), depth + 1)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function isFindExecTerminator(word: string): boolean {
+  return word === ";" || word === "\\;" || word === "+";
 }
 
 function isTarExtractionSegment(segment: string): boolean {

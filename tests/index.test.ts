@@ -278,6 +278,12 @@ describe("pi-raft extension integration", () => {
       "sudo --chdir /tmp bash -lc 'touch file.txt'",
       "sudo -k touch file.txt",
       "sudo --reset-timestamp touch file.txt",
+      "sudo -Eu root touch file.txt",
+      "env -iu PATH touch file.txt",
+      "echo $(touch file.txt)",
+      "echo `touch file.txt`",
+      "cat <(touch file.txt)",
+      '"touch" file.txt',
     ]) {
       const result = await harness.emit("tool_call", bash(command));
       expect(result).toMatchObject({ block: true });
@@ -299,6 +305,8 @@ describe("pi-raft extension integration", () => {
       "git checkout main",
       "git -C repo checkout main",
       "git switch feature",
+      "git rm tracked.ts",
+      "git mv old.ts new.ts",
     ]) {
       const result = await harness.emit("tool_call", bash(command));
       expect(result).toMatchObject({ block: true });
@@ -314,6 +322,8 @@ describe("pi-raft extension integration", () => {
     expect(await harness.emit("tool_call", bash("git clean -nd"))).toBeUndefined();
     expect(await harness.emit("tool_call", bash("git clean --dry-run -d"))).toBeUndefined();
     expect(await harness.emit("tool_call", bash("git -C repo clean -nd"))).toBeUndefined();
+    expect(await harness.emit("tool_call", bash("git rm -n tracked.ts"))).toBeUndefined();
+    expect(await harness.emit("tool_call", bash("git mv -n old.ts new.ts"))).toBeUndefined();
     expect(harness.appended).toHaveLength(0);
   });
 
@@ -330,6 +340,54 @@ describe("pi-raft extension integration", () => {
     const result = await harness.emit("tool_call", bash("sudo -u root touch file.txt"));
     expect(result).toMatchObject({ block: true });
     expect(result.reason).toContain("shell file mutation");
+  });
+
+  it("blocks sudo edit mode before the claim gate", async () => {
+    const harness = createHarness();
+
+    for (const command of ["sudo -e README.md", "sudo --edit README.md", "sudoedit README.md"]) {
+      const result = await harness.emit("tool_call", bash(command));
+      expect(result).toMatchObject({ block: true });
+      expect(result.reason).toContain("shell file mutation");
+      expect(result.reason).toContain("msg read");
+    }
+    expect(harness.appended).toHaveLength(0);
+  });
+
+  it("blocks package manager install aliases before the claim gate", async () => {
+    const harness = createHarness();
+
+    for (const command of ["npm ci", "npm i", "pnpm i", "yarn install", "bun install"]) {
+      const result = await harness.emit("tool_call", bash(command));
+      expect(result).toMatchObject({ block: true });
+      expect(result.reason).toContain("shell file mutation");
+      expect(result.reason).toContain("msg read");
+    }
+
+    expect(await harness.emit("tool_call", bash("npm ci --dry-run"))).toBeUndefined();
+    await reachClaimed(harness);
+    expect(await harness.emit("tool_call", bash("npm ci"))).toBeUndefined();
+  });
+
+  it("blocks direct file-mutating commands before the claim gate", async () => {
+    const harness = createHarness();
+
+    for (const command of [
+      "sed --in-place -e s/a/b/ file.txt",
+      "sed -e s/a/b/ -i file.txt",
+      "patch -p1 < fix.patch",
+      "find . -name '*.tmp' -delete",
+      "find . -name x -exec touch {} ';'",
+      "find . -name x -execdir sh -c 'touch file.txt' ';'",
+    ]) {
+      const result = await harness.emit("tool_call", bash(command));
+      expect(result).toMatchObject({ block: true });
+      expect(result.reason).toContain("shell file mutation");
+      expect(result.reason).toContain("msg read");
+    }
+
+    expect(await harness.emit("tool_call", bash("patch --dry-run -p1 < fix.patch"))).toBeUndefined();
+    expect(harness.appended).toHaveLength(0);
   });
 
   it("blocks tar extraction before the claim gate", async () => {
@@ -890,6 +948,39 @@ describe("pi-raft extension integration", () => {
       taskId: null,
       replyTarget: null,
     });
+  });
+
+  it("resets stale state when prompt rejects the old task by id", async () => {
+    const harness = createHarness([
+      {
+        type: "custom",
+        customType: "pi-raft-state",
+        data: {
+          currentState: "IN_REVIEW",
+          taskId: "42",
+          replyTarget: null,
+        },
+      },
+    ]);
+
+    await harness.emit("session_start", { type: "session_start", reason: "reload" });
+    const promptResult = await harness.emit("before_agent_start", {
+      type: "before_agent_start",
+      prompt: "Ignore task #42 and update README.",
+      systemPrompt: "base",
+      systemPromptOptions: {},
+    });
+
+    expect(promptResult.systemPrompt).toContain("[Slock] State: IDLE");
+    expect(latestState(harness)).toMatchObject({
+      currentState: "IDLE",
+      taskId: null,
+      replyTarget: null,
+    });
+
+    const result = await harness.emit("tool_call", write("console.log('fresh');"));
+    expect(result).toMatchObject({ block: true });
+    expect(result.reason).toContain("msg read");
   });
 
   it("blocks stale prior-task completion after claiming the next task", async () => {
