@@ -30,6 +30,9 @@ normalize_scenario() {
 		E | E-chained-command)
 			printf 'E-chained-command\n'
 			;;
+		F | F-lifecycle-reset)
+			printf 'F-lifecycle-reset\n'
+			;;
 		*)
 			printf '%s\n' "$1"
 			;;
@@ -306,6 +309,80 @@ JSON
 	fi
 }
 
+write_f_lifecycle_reset_result() {
+	local result_file="$1"
+
+	if ! cat >"$result_file" <<'JSON'; then
+{
+  "scenario": "F-lifecycle-reset",
+  "runner": "synthetic",
+  "events": [
+    {
+      "type": "state",
+      "state": "IN_REVIEW",
+      "taskId": "42"
+    },
+    {
+      "type": "tool_call",
+      "tool": "bash",
+      "command": "raft task list --channel general",
+      "blocked": false
+    },
+    {
+      "type": "state",
+      "state": "IN_REVIEW",
+      "taskId": "42",
+      "changed": false
+    },
+    {
+      "type": "tool_call",
+      "tool": "bash",
+      "command": "raft task update --number 42 --status done",
+      "blocked": false
+    },
+    {
+      "type": "state",
+      "state": "DONE",
+      "taskId": null,
+      "replyTarget": null
+    },
+    {
+      "type": "block",
+      "tool": "bash",
+      "command": "raft task claim 27",
+      "reason": "Blocked: must read messages first (raft msg read) before task claim"
+    },
+    {
+      "type": "tool_call",
+      "tool": "bash",
+      "command": "raft msg read --channel general",
+      "blocked": false
+    },
+    {
+      "type": "state",
+      "state": "MESSAGES_READ",
+      "taskId": null,
+      "replyTarget": null
+    },
+    {
+      "type": "tool_call",
+      "tool": "bash",
+      "command": "raft task claim 27",
+      "blocked": false
+    },
+    {
+      "type": "state",
+      "state": "TASK_CLAIMED",
+      "taskId": "27",
+      "replyTarget": null
+    }
+  ]
+}
+JSON
+		fail "could not write $result_file"
+	fi
+}
+
 if (($# != 1)); then
 	usage
 	exit 2
@@ -340,6 +417,9 @@ case "$scenario" in
 		;;
 	E-chained-command)
 		write_e_chained_command_result "$result_file"
+		;;
+	F-lifecycle-reset)
+		write_f_lifecycle_reset_result "$result_file"
 		;;
 	*)
 		fail "scenario is not implemented: $scenario"

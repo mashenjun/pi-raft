@@ -50,20 +50,26 @@ export function createStateMachine(initial?: ActiveState): StateMachine {
         };
       }
 
+      const previousState = state.currentState;
+      if (isMismatchedTaskUpdateDone(state, action)) {
+        return {
+          allowed: false,
+          reason: `task update done targets #${taskNumberFor(action)} but active task is #${state.taskId}`,
+        };
+      }
+
       const nextState = nextStateFor(state.currentState, action);
       if (nextState) {
         state.currentState = nextState;
 
         if (action.noun === "task" && action.verb === "claim") {
           state.taskId = action.args.number ?? action.args["0"] ?? null;
+          state.replyTarget = null;
         }
         if (action.noun === "msg" && action.verb === "post") {
-          state.replyTarget = {
-            channel: action.args.channel ?? "",
-            threadTs: action.args.thread,
-          };
+          state.replyTarget = replyTargetFor(action);
         }
-        if (nextState === "IDLE") {
+        if (isTaskUpdateDone(action) || (previousState === "DONE" && nextState === "MESSAGES_READ")) {
           state.taskId = null;
           state.replyTarget = null;
         }
@@ -83,6 +89,9 @@ export function createStateMachine(initial?: ActiveState): StateMachine {
       }
       if (state.currentState === "MESSAGES_READ") {
         return { allowed: false, reason: "must claim a task first (raft task claim <id>)" };
+      }
+      if (state.currentState === "DONE") {
+        return { allowed: false, reason: "must read messages first (raft msg read)" };
       }
       return { allowed: true };
     },
@@ -119,10 +128,12 @@ function nextStateFor(currentState: SlockState, action: RaftAction): SlockState 
     case "IN_REVIEW":
       if (isMsgRead(action)) return "IN_REVIEW";
       if (isTaskUpdateInReview(action)) return "IN_REVIEW";
+      if (isTaskUpdateDone(action)) return "DONE";
       if (isMsgPost(action)) return "DONE";
       return null;
     case "DONE":
-      if (isMsgRead(action)) return "IDLE";
+      if (isTaskUpdateDone(action)) return "DONE";
+      if (isMsgRead(action)) return "MESSAGES_READ";
       return null;
   }
 }
@@ -145,9 +156,45 @@ function isTaskUpdateInReview(action: RaftAction): boolean {
     action.args.status === "in_review";
 }
 
+function isTaskUpdateDone(action: RaftAction): boolean {
+  return action.noun === "task" &&
+    action.verb === "update" &&
+    action.args.status === "done";
+}
+
+function isMismatchedTaskUpdateDone(state: ActiveState, action: RaftAction): boolean {
+  if (!isTaskUpdateDone(action) || !state.taskId) return false;
+  const taskNumber = taskNumberFor(action);
+  return taskNumber !== null && taskNumber !== state.taskId;
+}
+
+function taskNumberFor(action: RaftAction): string | null {
+  return action.args.number ?? action.args["0"] ?? null;
+}
+
 function isReadOnlyAction(action: RaftAction): boolean {
   if (action.args.help === "true") return true;
-  return action.noun === "task" && action.verb === "status";
+  if (action.noun === "task") {
+    return action.verb === "status" || action.verb === "list";
+  }
+  return action.noun === "msg" && action.verb === "check";
+}
+
+function replyTargetFor(action: RaftAction): { channel: string; threadTs?: string } {
+  const explicitChannel = action.args.channel;
+  const target = action.args.target;
+  const threadTs = action.args.thread;
+
+  if (explicitChannel) {
+    return { channel: explicitChannel, threadTs };
+  }
+
+  if (target) {
+    const [channel, targetThreadTs] = target.split(":", 2);
+    return { channel, threadTs: threadTs ?? targetThreadTs };
+  }
+
+  return { channel: "", threadTs };
 }
 
 function buildBlockReason(currentState: SlockState, action: RaftAction): string {
@@ -159,6 +206,9 @@ function buildBlockReason(currentState: SlockState, action: RaftAction): string 
   }
   if (currentState === "TASK_CLAIMED" && action.noun === "msg" && action.verb === "post") {
     return "must set task status to in_review before posting (raft task update --status in_review)";
+  }
+  if (currentState === "DONE") {
+    return `must read messages first (raft msg read) before ${action.noun} ${action.verb}`;
   }
   return `invalid transition from ${currentState}: ${action.noun} ${action.verb}`;
 }

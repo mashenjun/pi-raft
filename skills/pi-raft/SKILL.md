@@ -23,7 +23,7 @@ Follow these steps in order for each task:
 3. raft task update --number <task-id> --status in_review
 4. (write/edit files — now unlocked)
 5. raft msg post --channel <channel> --thread <ts> "your reply"
-6. (back to step 1 for the next task)
+6. raft msg read --channel <channel> (start the next task cycle)
 ```
 
 **Important:** Each step must be a separate command call. Do NOT chain them with
@@ -33,20 +33,23 @@ Follow these steps in order for each task:
 
 ```
 IDLE ──raft msg read──► MESSAGES_READ ──raft task claim──► TASK_CLAIMED
-  ▲                                                           │
-  │                              raft task update --status in_review
-  │                                                           │
-  │                                                           ▼
-  │                                                      IN_REVIEW
-  │                                                           │
-  │                                           raft msg post (in thread)
-  │                                                           │
-  │                                                           ▼
-  └────────────────── raft msg read ──────────────────────── DONE
-                     (reset for next task)
+                          ▲                                │
+                          │   raft task update --status in_review
+                          │                                │
+                          │                                ▼
+                          │                           IN_REVIEW
+                          │                                │
+                          │     raft msg post or task update --status done
+                          │                                │
+                          │                                ▼
+                          └──── raft msg read ◄──────── DONE
+                               clears stale task/reply context
 ```
 
 **Re-reading messages:** You can run `raft msg read` from any state. It never blocks.
+From `DONE`, it starts the next task cycle and moves to `MESSAGES_READ`.
+`raft task list`, `raft task status`, and `raft msg check` are read-only
+no-ops in every state.
 
 ## State Reference
 
@@ -56,7 +59,7 @@ IDLE ──raft msg read──► MESSAGES_READ ──raft task claim──► T
 | `MESSAGES_READ` | Channel messages have been read | `raft task claim`, re-read messages |
 | `TASK_CLAIMED` | You own a task | Write/edit files, `raft task update --status in_review` |
 | `IN_REVIEW` | Working on the task | All file operations, post reply |
-| `DONE` | Task complete, reply posted | `raft msg read` to start next task |
+| `DONE` | Task complete or explicitly marked done | `raft msg read` to start next task |
 
 ## What pi-raft Blocks
 
@@ -78,9 +81,19 @@ pi-raft intercepts your tool calls and prevents these violations:
 # Read messages in a channel
 raft msg read --channel <channel-name>
 
+# Check for messages without changing workflow state
+raft msg check --channel <channel-name>
+
 # Post a reply in a thread
 raft msg post --channel <channel> --thread <thread-ts> "your message"
+
+# Equivalent slock full-form command
+raft message send --target "<channel>:<thread-ts>" "your message"
 ```
+
+Both post forms require `IN_REVIEW`. Do not rely on an unstructured final
+response to report task completion; use the raft CLI post path so pi-raft can
+track completion.
 
 ### Tasks
 
@@ -92,6 +105,10 @@ raft task claim <task-id>
 raft task update --number <task-id> --status in_review
 raft task update --number <task-id> --status done
 ```
+
+`raft task update --status done` is terminal from `IN_REVIEW` and is also
+allowed after a reply post has already moved state to `DONE`. It clears the
+active task context; run `raft msg read` before claiming the next task.
 
 ## Troubleshooting
 
@@ -109,6 +126,7 @@ You attempted a transition that is out of order. Check what state you're in:
 - If you see `raft task claim` expected → you're in `MESSAGES_READ`
 - If you see `raft task update --status in_review` expected → you've just claimed a task
 - If you see `raft msg post` expected → you're in `IN_REVIEW`
+- If you see `raft msg read` after `DONE` → read the next assignment before claiming
 
 **"Why can't I use && to run multiple raft commands?"**
 
@@ -121,3 +139,4 @@ state tracking and prevents you from skipping prerequisite steps.
 - **Posting before in_review**: You must run `raft task update --status in_review` before posting your reply.
 - **Claiming without reading**: Always read messages before claiming a task. Claiming on stale context leads to conflicts.
 - **Echoing credentials**: pi-raft scans your bash commands for credential patterns. Redact API keys, tokens, and secrets.
+- **Review-only bypass**: Assigned review, analysis, and investigation work still requires task claim before substantive work.

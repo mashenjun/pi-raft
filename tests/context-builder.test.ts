@@ -17,6 +17,7 @@ describe("buildSlockContext — compact", () => {
     expect(ctx).toContain("[Slock]");
     expect(ctx).toContain("State: IDLE");
     expect(ctx).toContain("raft msg read");
+    expect(ctx).toContain("claim assigned review/analysis/investigation tasks");
   });
 
   it("formats TASK_CLAIMED with taskId", () => {
@@ -51,6 +52,7 @@ describe("buildSlockContext — full", () => {
     expect(ctx).toContain("Task: #7");
     expect(ctx).toContain("Reply to: #pi-raft");
     expect(ctx).toContain("Thread: ts_001");
+    expect(ctx).toContain("review, analysis, and investigation work requires a task claim");
     expect(ctx).toContain("Reference: /skill:pi-raft");
   });
 

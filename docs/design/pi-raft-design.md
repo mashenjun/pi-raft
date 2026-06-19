@@ -137,44 +137,50 @@ provides the complete reference that the agent can consult via `/skill:pi-raft`.
 slock workflow is a linear state machine with well-defined transitions:
 
 ```
-                        raft msg read
-    IDLE ──────────────────────────────► MESSAGES_READ
-      ▲                                       │
-      │                                  raft task claim <id>
-      │                                       │
-      │                                       ▼
-      │                                 TASK_CLAIMED
-      │                                       │
-      │                              raft task update --status in_review
-      │                                       │
-      │                                       ▼
-      │                                  IN_REVIEW
-      │                                       │
-      │                              raft msg post --channel <c> --thread <ts>
-      │                                       │
-      │                                       ▼
-      └──────────────────────────────────── DONE
-                   raft msg read
-                 (reset for next task)
+IDLE ──raft msg read──► MESSAGES_READ ──raft task claim──► TASK_CLAIMED
+                          ▲                                │
+                          │   raft task update --status in_review
+                          │                                │
+                          │                                ▼
+                          │                           IN_REVIEW
+                          │                                │
+                          │  raft msg post or task update --status done
+                          │                                │
+                          │                                ▼
+                          └──── raft msg read ◄──────── DONE
+                               clears stale task/reply context
 ```
 
 **States:**
 
 | State | Meaning | Allowed actions |
 |-------|---------|-----------------|
-| `IDLE` | Session start or task completed | Only `raft msg read` (or other read-only ops) |
+| `IDLE` | Session start | Only `raft msg read` (or other read-only ops) |
 | `MESSAGES_READ` | Messages have been read | `raft task claim`, `raft msg read` (re-read) |
 | `TASK_CLAIMED` | A task has been claimed | `raft task update --status in_review`, read/edit files |
-| `IN_REVIEW` | Working on the task | All file operations, status updates |
-| `DONE` | Task completed, reply posted | `raft msg read` (reset to `IDLE` for next task) |
+| `IN_REVIEW` | Working on the task | All file operations, post reply, `raft task update --status done` |
+| `DONE` | Task completed or explicitly marked done | `raft msg read` (start next task cycle as `MESSAGES_READ`), `raft task update --status done` after approval |
 
 **Enforcement rules:**
 
-- **Write files (`write`, `edit`)**: blocked unless state >= `TASK_CLAIMED`
+- **Write files (`write`, `edit`)**: allowed only in `TASK_CLAIMED` or
+  `IN_REVIEW`
 - **`raft` commands that modify state**: parsed from bash; transitions
   validated against current state
 - **`raft task claim` without prior `raft msg read`**: blocked
 - **`raft msg post` without prior `raft task update --status in_review`**: blocked
+- **Read-only inspection** (`raft task list`, `raft task status`,
+  `raft msg check`): allowed as no-op transitions from every state
+
+**Post semantics:**
+
+- `raft msg post` and normalized `raft message send` are treated as the same
+  state-machine action.
+- CLI posts are valid only from `IN_REVIEW`. A valid post transitions to `DONE`
+  and records the reply target from `--channel/--thread` or `--target`.
+- If slock sends a final public response without a `raft` CLI tool call,
+  pi-raft cannot transition or block it through the `tool_call` hook. That path
+  must be controlled by slock policy and injected context.
 
 ### State Persistence
 
@@ -446,7 +452,7 @@ Summary:
 | E: Context & Docs | `before_agent_start` hook, context builder, SKILL.md | ~130 |
 | F: Integration | Wire all components | ~30 |
 | G: Configuration | Config loading, `strictMode` toggle | ~50 |
-| H: Verification | Test harness, 5 scenario tests | ~180 |
+| H: Verification | Test harness, 6 scenario tests | ~180 |
 | I: Benchmark | 5 GitHub issues, CI setup | ~30 |
 
 **Core extension estimated: ~480 LoC. Full project (including scaffolding, tests, benchmark): ~730 LoC.**
@@ -469,7 +475,8 @@ test-harness/
 │   ├── B-parallel-conflict.txt
 │   ├── C-cross-turn.txt
 │   ├── D-credential-leak.txt
-│   └── E-chained-command.txt
+│   ├── E-chained-command.txt
+│   └── F-lifecycle-reset.txt
 ├── fixtures/
 │   └── slock-tasks.json    # Pre-seeded mock tasks
 ├── assertions/
@@ -681,9 +688,9 @@ esac
    enforcement runs in `tool_call`, before the CLI exits. pi-raft validates the
    command shape and intended transition, not the eventual slock result. This is
    why state transitions must be conservative: read-only commands like
-   `raft task status --help` are no-ops, and `IN_REVIEW` only follows the real
-   mutating command `raft task update --status in_review`. Confirmed-success
-   synchronization would require a future post-execution hook.
+   `raft task status --help` and `raft msg check` are no-ops, and `IN_REVIEW`
+   only follows the real mutating command `raft task update --status in_review`.
+   Confirmed-success synchronization would require a future post-execution hook.
 
 5. **How to handle the auto-claim race condition (P12)?** Experiment E R2-R3
    showed the agent claims tasks within seconds of creation, before the tester
@@ -705,7 +712,7 @@ esac
 
 8. **Should read-only review or analysis require task claims?** This is a policy
    gap, not a state-machine bug. pi-raft can block protected operations such as
-   writes, message posts, and invalid raft transitions. It cannot infer intent
-   from read-only shell commands like `find`, `rg`, or `cat`. If review-only repo
-   analysis must require claims, slock policy or prompt/context rules must define
-   that expectation explicitly.
+   writes, message posts, and invalid raft transitions. It also injects context
+   that assigned review, analysis, and investigation work requires a claim. It
+   still cannot prove intent from read-only shell commands like `find`, `rg`, or
+   `cat` unless a protected tool call occurs.

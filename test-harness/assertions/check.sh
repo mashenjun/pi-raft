@@ -32,6 +32,9 @@ normalize_scenario() {
 		E | E-chained-command)
 			printf 'E-chained-command\n'
 			;;
+		F | F-lifecycle-reset)
+			printf 'F-lifecycle-reset\n'
+			;;
 		*)
 			printf '%s\n' "$1"
 			;;
@@ -152,6 +155,30 @@ case "$scenario" in
 		assert_jq \
 			'.events[] | select(.type == "state" and .state == "TASK_CLAIMED" and .taskId == "42")' \
 			"expected transition to TASK_CLAIMED"
+		pass "all assertions passed"
+		;;
+	F-lifecycle-reset)
+		assert_jq \
+			'.events[] | select(.type == "tool_call" and .tool == "bash" and (.command | contains("raft task list")) and .blocked == false)' \
+			"expected task list to be allowed"
+		assert_jq \
+			'.events[] | select(.type == "state" and .state == "IN_REVIEW" and .changed == false)' \
+			"expected task list to leave IN_REVIEW unchanged"
+		assert_jq \
+			'.events[] | select(.type == "tool_call" and .tool == "bash" and (.command | contains("--status done")) and .blocked == false)' \
+			"expected task update done to be allowed"
+		assert_jq \
+			'.events[] | select(.type == "state" and .state == "DONE" and .taskId == null and .replyTarget == null)' \
+			"expected DONE to clear active task context"
+		assert_jq \
+			'.events[] | select(.type == "block" and .tool == "bash" and (.command | contains("raft task claim 27")) and (.reason | contains("msg read")))' \
+			"expected direct next claim to require fresh message read"
+		assert_jq \
+			'.events[] | select(.type == "state" and .state == "MESSAGES_READ" and .taskId == null and .replyTarget == null)' \
+			"expected fresh msg read to enter MESSAGES_READ"
+		assert_jq \
+			'.events[] | select(.type == "state" and .state == "TASK_CLAIMED" and .taskId == "27" and .replyTarget == null)' \
+			"expected next task claim to clear stale reply target"
 		pass "all assertions passed"
 		;;
 	*)

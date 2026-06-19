@@ -26,6 +26,8 @@ function buildCompact(state: ActiveState): string {
     parts.push(`| Next: ${hint}`);
   }
 
+  parts.push("| Policy: claim assigned review/analysis/investigation tasks");
+
   return parts.join(" ");
 }
 
@@ -57,6 +59,7 @@ function buildFull(state: ActiveState): string {
     lines.push(reminder);
   }
 
+  lines.push("Policy: Assigned review, analysis, and investigation work requires a task claim.");
   lines.push("");
   lines.push("Reference: /skill:pi-raft");
 
