@@ -21,7 +21,7 @@ Follow these steps in order for each task:
 1. raft msg read --channel <channel>
 2. raft task claim <task-id>
 3. raft task update --number <task-id> --status in_review
-4. (write/edit files — now unlocked)
+4. (file operations for the claimed task are now unlocked)
 5. raft msg post --channel <channel> --thread <ts> "your reply"
 6. raft msg read --channel <channel> (start the next task cycle)
 ```
@@ -47,7 +47,8 @@ IDLE ──raft msg read──► MESSAGES_READ ──raft task claim──► T
 ```
 
 **Re-reading messages:** You can run `raft msg read` from any state. It never blocks.
-From `DONE`, it starts the next task cycle and moves to `MESSAGES_READ`.
+From `TASK_CLAIMED`, `IN_REVIEW`, or `DONE`, it starts a fresh task cycle,
+moves to `MESSAGES_READ`, and clears stale active task context.
 `raft task list`, `raft task status`, and `raft msg check` are read-only
 no-ops in every state.
 
@@ -57,8 +58,8 @@ no-ops in every state.
 |-------|---------|-------------------|
 | `IDLE` | Session start or previous task completed | `raft msg read` only |
 | `MESSAGES_READ` | Channel messages have been read | `raft task claim`, re-read messages |
-| `TASK_CLAIMED` | You own a task | Write/edit files, `raft task update --status in_review` |
-| `IN_REVIEW` | Working on the task | All file operations, post reply |
+| `TASK_CLAIMED` | You own a task | File operations for that task, `raft task update --status in_review` |
+| `IN_REVIEW` | Working on the task | File operations for that task, post reply |
 | `DONE` | Task complete or explicitly marked done | `raft msg read` to start next task |
 
 ## What pi-raft Blocks
@@ -71,6 +72,8 @@ pi-raft intercepts your tool calls and prevents these violations:
 | **Skipping task claim** | Writing files before `raft task claim` | Claim a task before editing |
 | **Skipping status update** | Posting reply before `raft task update --status in_review` | Mark task in_review first |
 | **Chained commands** | `raft msg read && raft task claim 42` | Split into separate calls |
+| **Shell write bypass** | `echo data > file.txt` before a claim | Read messages and claim first |
+| **Stale task writes** | Writing for new work while old task is `IN_REVIEW` | Start a fresh read/claim cycle |
 | **Credential leaks** | Posting messages containing API keys, tokens, secrets | Redact credentials before posting |
 
 ## Raft CLI Reference
@@ -117,7 +120,7 @@ active task context; run `raft msg read` before claiming the next task.
 You haven't completed the prerequisite steps. The sequence is:
 1. `raft msg read --channel <channel>`
 2. `raft task claim <id>`
-3. Now you can write/edit files
+3. Now you can mutate files for the claimed task
 
 **"My raft command was blocked"**
 
@@ -138,5 +141,6 @@ state tracking and prevents you from skipping prerequisite steps.
 - **Chaining claim + status**: `raft task claim 8 && raft task update --status in_review` is blocked. Run them separately.
 - **Posting before in_review**: You must run `raft task update --status in_review` before posting your reply.
 - **Claiming without reading**: Always read messages before claiming a task. Claiming on stale context leads to conflicts.
+- **Reusing stale `IN_REVIEW`**: Fresh prompts and active-state message reads clear old task write permission. Claim the current task before editing.
 - **Echoing credentials**: pi-raft scans your bash commands for credential patterns. Redact API keys, tokens, and secrets.
 - **Review-only bypass**: Assigned review, analysis, and investigation work still requires task claim before substantive work.

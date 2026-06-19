@@ -14,10 +14,10 @@ pi install ./pi-raft
 
 pi-raft enforces slock workflow discipline at the tool level:
 
-- Blocks file writes before `raft message read` and `raft task claim`
+- Blocks file writes and shell file mutations before `raft message read` and `raft task claim`
 - Blocks chained raft commands (`&&`, `;` in single bash call)
 - Scans outgoing messages for credential patterns
-- Injects current workflow state into every agent turn
+- Injects current workflow state into every agent turn and resets stale active state for fresh prompts
 - Persists state across compactions via `pi.appendEntry()`
 
 ## Architecture

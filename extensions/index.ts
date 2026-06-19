@@ -8,7 +8,7 @@ import {
   parseRaftCommands,
 } from "./raft-parser";
 import { createStateMachine } from "./state-machine";
-import type { ActiveState, RaftAction, SlockState } from "./state-machine";
+import type { ActiveState, RaftAction, SlockState, StateMachine } from "./state-machine";
 import { buildSlockContext } from "./context-builder";
 
 export default function (pi: ExtensionAPI): void {
@@ -101,6 +101,21 @@ export default function (pi: ExtensionAPI): void {
         return;
       }
 
+      const shellMutation = detectShellMutation(command);
+      if (shellMutation) {
+        const canWrite = sm.canWrite();
+        if (!canWrite.allowed) {
+          return handleViolation(
+            config,
+            ctx,
+            buildBlockMessage(
+              `${shellMutation} requires a claimed active task. ${canWrite.reason ?? ""}`.trim(),
+              sm.snapshot().currentState,
+            ),
+          );
+        }
+      }
+
       return;
     }
 
@@ -135,6 +150,10 @@ export default function (pi: ExtensionAPI): void {
 
   pi.on("before_agent_start", async (event, ctx) => {
     const config = loadConfigForContext(ctx);
+    if (resetStaleActiveStateForPrompt(event, sm)) {
+      persistState();
+    }
+
     if (!config.injectContext) {
       return;
     }
@@ -259,4 +278,187 @@ function buildBlockMessage(reason: string, currentState: SlockState): string {
   }
 
   return lines.join("\n");
+}
+
+function resetStaleActiveStateForPrompt(
+  event: { prompt?: unknown },
+  sm: StateMachine,
+): boolean {
+  const state = sm.snapshot();
+  const hasActiveTaskContext = state.currentState === "TASK_CLAIMED" ||
+    state.currentState === "IN_REVIEW" ||
+    (state.currentState === "DONE" && state.taskId !== null);
+  if (!hasActiveTaskContext) {
+    return false;
+  }
+
+  const prompt = typeof event.prompt === "string" ? event.prompt : "";
+  if (!prompt.trim() || isContinuationPrompt(prompt, state.taskId)) {
+    return false;
+  }
+
+  sm.reset();
+  console.log(
+    `[pi-raft] reset stale ${state.currentState}` +
+      (state.taskId ? ` task: ${state.taskId}` : "") +
+      " for fresh prompt",
+  );
+  return true;
+}
+
+function isContinuationPrompt(prompt: string, taskId: string | null): boolean {
+  const text = prompt.toLowerCase();
+  if (/\b(continue|resume|keep working|carry on|same task)\b/.test(text)) {
+    return true;
+  }
+  if (/\b(nothing to do|just stop)\b/.test(text)) {
+    return true;
+  }
+  if (taskId && mentionsTaskId(text, taskId)) {
+    return true;
+  }
+  return false;
+}
+
+function mentionsTaskId(text: string, taskId: string): boolean {
+  const escaped = taskId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?:task\\s*#?${escaped}|#${escaped})`).test(text);
+}
+
+function detectShellMutation(command: string): string | null {
+  if (hasFileOutputRedirection(command)) {
+    return "shell file redirection";
+  }
+
+  const stripped = stripQuotedText(command);
+  for (const segment of splitShellSegments(stripped)) {
+    if (isMutatingShellSegment(segment)) {
+      return "shell file mutation";
+    }
+  }
+
+  return null;
+}
+
+function stripQuotedText(input: string): string {
+  let result = "";
+  let inSingle = false;
+  let inDouble = false;
+
+  for (let i = 0; i < input.length; i++) {
+    const ch = input[i];
+    if (ch === "'" && !inDouble) {
+      inSingle = !inSingle;
+      result += " ";
+      continue;
+    }
+    if (ch === '"' && !inSingle) {
+      inDouble = !inDouble;
+      result += " ";
+      continue;
+    }
+    result += inSingle || inDouble ? " " : ch;
+  }
+
+  return result;
+}
+
+function hasFileOutputRedirection(command: string): boolean {
+  let inSingle = false;
+  let inDouble = false;
+
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i];
+    if (ch === "'" && !inDouble) {
+      inSingle = !inSingle;
+      continue;
+    }
+    if (ch === '"' && !inSingle) {
+      inDouble = !inDouble;
+      continue;
+    }
+    if (inSingle || inDouble) {
+      continue;
+    }
+
+    const isAmpersandRedirect = ch === "&" && command[i + 1] === ">";
+    const isOutputRedirect = ch === ">" && command[i - 1] !== "=";
+    if (!isAmpersandRedirect && !isOutputRedirect) {
+      continue;
+    }
+
+    const targetStart = skipRedirectOperator(command, i);
+    const target = readRedirectTarget(command, targetStart);
+    if (!target || target === "/dev/null" || /^&\d+$/.test(target)) {
+      i = targetStart;
+      continue;
+    }
+
+    return true;
+  }
+
+  return false;
+}
+
+function skipRedirectOperator(command: string, index: number): number {
+  let i = index;
+  if (command[i] === "&") {
+    i++;
+  }
+  while (command[i] === ">") {
+    i++;
+  }
+  while (i < command.length && /\s/.test(command[i])) {
+    i++;
+  }
+  return i;
+}
+
+function readRedirectTarget(command: string, start: number): string {
+  let i = start;
+  let quote: "'" | '"' | null = null;
+  let target = "";
+
+  while (i < command.length) {
+    const ch = command[i];
+    if (quote) {
+      if (ch === quote) {
+        quote = null;
+      } else {
+        target += ch;
+      }
+      i++;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      i++;
+      continue;
+    }
+    if (/\s/.test(ch)) {
+      break;
+    }
+    target += ch;
+    i++;
+  }
+
+  return target;
+}
+
+function splitShellSegments(strippedCommand: string): string[] {
+  return strippedCommand
+    .split(/\s*(?:&&|\|\||;)\s*/g)
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+}
+
+function isMutatingShellSegment(segment: string): boolean {
+  const normalized = segment.replace(/^(?:env\s+\S+\s+|sudo\s+)+/, "");
+  return /^(?:touch|mkdir|mv|cp|rm|chmod|chown|install|tee)\b/.test(normalized) ||
+    /^sed\s+-[A-Za-z]*i[A-Za-z]*\b/.test(normalized) ||
+    /^perl\s+-[A-Za-z]*i[A-Za-z]*\b/.test(normalized) ||
+    /^git\s+(?:apply|checkout-index)\b/.test(normalized) ||
+    /^(?:npm|pnpm|bun|yarn)\s+(?:install|add|remove|update)\b/.test(normalized) ||
+    /^(?:tar|bsdtar)\s+.*\s-(?:[A-Za-z]*x|x[A-Za-z]*)\b/.test(normalized) ||
+    /^unzip\b/.test(normalized);
 }

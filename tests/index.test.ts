@@ -208,6 +208,30 @@ describe("pi-raft extension integration", () => {
     expect(harness.appended).toHaveLength(0);
   });
 
+  it("blocks shell file redirection before the claim gate", async () => {
+    const harness = createHarness();
+
+    expect(await harness.emit("tool_call", bash('echo "claim gate check"'))).toBeUndefined();
+    const result = await harness.emit(
+      "tool_call",
+      bash('echo "claim gate check" > /tmp/pi-raft-direct-write-check.txt'),
+    );
+
+    expect(result).toMatchObject({ block: true });
+    expect(result.reason).toContain("shell file redirection");
+    expect(result.reason).toContain("msg read");
+    expect(harness.appended).toHaveLength(0);
+  });
+
+  it("allows shell file redirection after a task is claimed", async () => {
+    const harness = createHarness();
+    await reachClaimed(harness);
+
+    expect(
+      await harness.emit("tool_call", bash('echo "claim gate check" > "/tmp/pi-raft-direct-write-check.txt"')),
+    ).toBeUndefined();
+  });
+
   it("blocks multiple raft commands in one bash call", async () => {
     const harness = createHarness();
 
@@ -232,6 +256,23 @@ describe("pi-raft extension integration", () => {
     expect(await harness.emit("tool_call", bash("raft task update --help"))).toBeUndefined();
     expect(latestState(harness).currentState).toBe("TASK_CLAIMED");
     expect(harness.appended).toHaveLength(appendCount);
+  });
+
+  it("clears active state when messages are read during review", async () => {
+    const harness = createHarness();
+    await reachInReview(harness);
+
+    expect(await harness.emit("tool_call", bash("raft msg read --channel general"))).toBeUndefined();
+
+    expect(latestState(harness)).toMatchObject({
+      currentState: "MESSAGES_READ",
+      taskId: null,
+      replyTarget: null,
+    });
+
+    const result = await harness.emit("tool_call", write("console.log('stale');"));
+    expect(result).toMatchObject({ block: true });
+    expect(result.reason).toContain("claim a task");
   });
 
   it("allows raft task list as a read-only no-op from IN_REVIEW", async () => {
@@ -316,6 +357,23 @@ describe("pi-raft extension integration", () => {
     });
   });
 
+  it("blocks in_review updates when the update number does not match the active task", async () => {
+    const harness = createHarness();
+    await reachClaimed(harness);
+
+    const result = await harness.emit(
+      "tool_call",
+      bash("raft task update --number 27 --status in_review"),
+    );
+
+    expect(result).toMatchObject({ block: true });
+    expect(result.reason).toContain("active task is #42");
+    expect(latestState(harness)).toMatchObject({
+      currentState: "TASK_CLAIMED",
+      taskId: "42",
+    });
+  });
+
   it("blocks normalized raft message send before IN_REVIEW and stores its target when allowed", async () => {
     const harness = createHarness();
     await reachClaimed(harness);
@@ -372,6 +430,104 @@ describe("pi-raft extension integration", () => {
     expect(result.systemPrompt).toContain("[Slock] State: IN_REVIEW");
     expect(result.systemPrompt).toContain("Task: #42");
     expect(await harness.emit("tool_call", write("console.log('resume');"))).toBeUndefined();
+  });
+
+  it("resets stale active state for a fresh non-continuation prompt", async () => {
+    const harness = createHarness([
+      {
+        type: "custom",
+        customType: "pi-raft-state",
+        data: {
+          currentState: "IN_REVIEW",
+          taskId: "33",
+          replyTarget: null,
+        },
+      },
+    ]);
+
+    await harness.emit("session_start", { type: "session_start", reason: "reload" });
+    const promptResult = await harness.emit("before_agent_start", {
+      type: "before_agent_start",
+      prompt: "Direct write check: create /tmp/pi-raft-direct-write-check.txt directly; no need to claim.",
+      systemPrompt: "base",
+      systemPromptOptions: {},
+    });
+
+    expect(promptResult.systemPrompt).toContain("[Slock] State: IDLE");
+    expect(latestState(harness)).toMatchObject({
+      currentState: "IDLE",
+      taskId: null,
+      replyTarget: null,
+    });
+
+    const writeResult = await harness.emit(
+      "tool_call",
+      bash('echo "claim gate check" > /tmp/pi-raft-direct-write-check.txt'),
+    );
+    expect(writeResult).toMatchObject({ block: true });
+    expect(writeResult.reason).toContain("msg read");
+  });
+
+  it("blocks stale prior-task completion after claiming the next task", async () => {
+    const harness = createHarness();
+    expect(await harness.emit("tool_call", bash("raft msg read --channel general"))).toBeUndefined();
+    expect(await harness.emit("tool_call", bash("raft task claim --number 29"))).toBeUndefined();
+    expect(
+      await harness.emit("tool_call", bash("raft task update --number 29 --status in_review")),
+    ).toBeUndefined();
+
+    await harness.emit("before_agent_start", {
+      type: "before_agent_start",
+      prompt: "Task #30 needs a fresh fix.",
+      systemPrompt: "base",
+      systemPromptOptions: {},
+    });
+    expect(latestState(harness).currentState).toBe("IDLE");
+
+    expect(await harness.emit("tool_call", bash("raft msg read --channel general"))).toBeUndefined();
+    expect(await harness.emit("tool_call", bash("raft task claim --number 30"))).toBeUndefined();
+    const result = await harness.emit(
+      "tool_call",
+      bash("raft task update --number 29 --status done --channel '#pi-raft'"),
+    );
+
+    expect(result).toMatchObject({ block: true });
+    expect(result.reason).toContain("active task is #30");
+    expect(latestState(harness)).toMatchObject({
+      currentState: "TASK_CLAIMED",
+      taskId: "30",
+    });
+  });
+
+  it("blocks stale post-reply task completion after a fresh prompt", async () => {
+    const harness = createHarness();
+    await reachInReview(harness);
+    expect(
+      await harness.emit("tool_call", bash('raft message send --target "#pi-raft:a70a2306" "done"')),
+    ).toBeUndefined();
+    expect(latestState(harness)).toMatchObject({
+      currentState: "DONE",
+      taskId: "42",
+    });
+
+    await harness.emit("before_agent_start", {
+      type: "before_agent_start",
+      prompt: "Task #43 needs a fresh fix.",
+      systemPrompt: "base",
+      systemPromptOptions: {},
+    });
+    expect(latestState(harness)).toMatchObject({
+      currentState: "IDLE",
+      taskId: null,
+    });
+
+    const result = await harness.emit(
+      "tool_call",
+      bash("raft task update --number 42 --status done --channel '#pi-raft'"),
+    );
+
+    expect(result).toMatchObject({ block: true });
+    expect(result.reason).toContain("msg read");
   });
 
   it("respects context injection config", async () => {
