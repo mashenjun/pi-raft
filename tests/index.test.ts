@@ -272,6 +272,7 @@ describe("pi-raft extension integration", () => {
       "env -S 'touch file.txt'",
       "env -S 'A=1 touch file.txt'",
       "env -S '-i touch file.txt'",
+      "/usr/bin/env -S 'touch file.txt'",
       'env --split-string=\'bash -lc "touch file.txt"\'',
       "sudo -u root bash -lc 'touch file.txt'",
       "sudo -D /tmp bash -lc 'touch file.txt'",
@@ -308,6 +309,7 @@ describe("pi-raft extension integration", () => {
       "git rm tracked.ts",
       "git mv old.ts new.ts",
       "git rm -- -h",
+      "git rm --pathspec-from-file --dry-run",
     ]) {
       const result = await harness.emit("tool_call", bash(command));
       expect(result).toMatchObject({ block: true });
@@ -342,9 +344,15 @@ describe("pi-raft extension integration", () => {
     expect(await harness.emit("tool_call", bash("sudo -gwheel id"))).toBeUndefined();
     expect(harness.appended).toHaveLength(0);
 
-    const result = await harness.emit("tool_call", bash("sudo -u root touch file.txt"));
-    expect(result).toMatchObject({ block: true });
-    expect(result.reason).toContain("shell file mutation");
+    for (const command of [
+      "sudo -u root touch file.txt",
+      "sudo -udev touch file.txt",
+      "sudo -gwheel touch file.txt",
+    ]) {
+      const result = await harness.emit("tool_call", bash(command));
+      expect(result).toMatchObject({ block: true });
+      expect(result.reason).toContain("shell file mutation");
+    }
   });
 
   it("blocks sudo edit mode before the claim gate", async () => {
@@ -367,6 +375,12 @@ describe("pi-raft extension integration", () => {
       "npm i",
       "npm in",
       "npm ins lodash",
+      "npm un lodash",
+      "npm unlink lodash",
+      "npm r lodash",
+      "npm upgrade",
+      "npm link",
+      "npm ln ../pkg",
       "pnpm i",
       "yarn install",
       "bun install",
@@ -402,6 +416,7 @@ describe("pi-raft extension integration", () => {
       "find . -name '*.tmp' -delete",
       "find . -name x -exec touch {} ';'",
       "find . -name x -exec /bin/rm {} ';'",
+      "find . -name x -exec /usr/bin/env -S 'touch file.txt' ';'",
       "find . -name x -execdir sh -c 'touch file.txt' ';'",
     ]) {
       const result = await harness.emit("tool_call", bash(command));
@@ -1010,6 +1025,32 @@ describe("pi-raft extension integration", () => {
       expect(result).toMatchObject({ block: true });
       expect(result.reason).toContain("msg read");
     }
+  });
+
+  it("preserves stale state when prompt only defers completion", async () => {
+    const harness = createHarness([
+      {
+        type: "custom",
+        customType: "pi-raft-state",
+        data: {
+          currentState: "IN_REVIEW",
+          taskId: "42",
+          replyTarget: null,
+        },
+      },
+    ]);
+
+    await harness.emit("session_start", { type: "session_start", reason: "reload" });
+    const promptResult = await harness.emit("before_agent_start", {
+      type: "before_agent_start",
+      prompt: "Do not complete task #42 yet; continue working on it.",
+      systemPrompt: "base",
+      systemPromptOptions: {},
+    });
+
+    expect(promptResult.systemPrompt).toContain("[Slock] State: IN_REVIEW");
+    expect(promptResult.systemPrompt).toContain("Task: #42");
+    expect(await harness.emit("tool_call", write("console.log('same task');"))).toBeUndefined();
   });
 
   it("blocks stale prior-task completion after claiming the next task", async () => {

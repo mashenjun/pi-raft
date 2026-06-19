@@ -378,7 +378,7 @@ function mentionsRejectedTaskId(text: string, taskId: string): boolean {
   const oldTaskPattern = String.raw`(?:task\s*#?${escaped}|#${escaped})(?!\d)`;
   const negatedActiveTaskAction =
     String.raw`(?:do not|don't|dont|never|no longer)\s+` +
-    String.raw`(?:work\s+on|use|handle|continue|resume|keep\s+working\s+on|carry\s+on\s+with|claim|complete|finish)\b`;
+    String.raw`(?:work\s+on|use|handle|continue|resume|keep\s+working\s+on|carry\s+on\s+with|claim)\b`;
   return new RegExp(String.raw`\b(?:ignore|stop|drop|abandon|discard|cancel)\b.{0,30}${oldTaskPattern}`)
     .test(text) ||
     new RegExp(String.raw`${oldTaskPattern}.{0,30}\b(?:ignore|stop|drop|abandon|discard|cancel)\b`)
@@ -801,9 +801,24 @@ function skipSudoPrefix(words: string[], start: number): number {
 }
 
 function sudoOptionStopsExecution(word: string): boolean {
-  const option = word.split("=", 1)[0];
-  return /^(?:--(?:list|validate|remove-timestamp|version|help)|-[^-]*[lvKV])$/
-    .test(option);
+  if (word.startsWith("--")) {
+    const option = word.split("=", 1)[0];
+    return /^(?:--(?:list|validate|remove-timestamp|version|help))$/.test(option);
+  }
+  if (!/^-[^-]\S*$/.test(word)) {
+    return false;
+  }
+  const chars = word.slice(1);
+  for (let pos = 0; pos < chars.length; pos++) {
+    const option = chars[pos];
+    if ("lvKV".includes(option)) {
+      return true;
+    }
+    if (sudoShortOptionNeedsValue(option)) {
+      return false;
+    }
+  }
+  return false;
 }
 
 function skipSudoOption(words: string[], index: number): number {
@@ -908,13 +923,13 @@ function envSplitStringCommands(command: string): string[] {
 function envWordIndex(words: string[]): number {
   let i = 0;
   while (i < words.length) {
-    if (words[i] === "sudo") {
+    if (commandBaseName(words[i]) === "sudo") {
       const next = skipSudoPrefix(words, i + 1);
       if (next === -1) return -1;
       i = next;
       continue;
     }
-    return words[i] === "env" ? i : -1;
+    return commandBaseName(words[i]) === "env" ? i : -1;
   }
   return -1;
 }
@@ -1127,13 +1142,21 @@ function isMutatingGitSegment(segment: string): boolean {
 
 function gitOptionArgsBeforePathspec(args: string[]): string[] {
   const result: string[] = [];
-  for (const arg of args) {
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
     if (arg === "--") {
       break;
     }
     result.push(arg);
+    if (gitPathspecOptionNeedsValue(arg) && !arg.includes("=") && i + 1 < args.length) {
+      i++;
+    }
   }
   return result;
+}
+
+function gitPathspecOptionNeedsValue(option: string): boolean {
+  return option === "--pathspec-from-file";
 }
 
 function gitSubcommandIndex(words: string[]): number {
@@ -1184,7 +1207,7 @@ function isMutatingPackageManagerSegment(segment: string): boolean {
     return false;
   }
   if (executable === "npm") {
-    return /^(?:install|i|in|ins|inst|insta|instal|isnt|isnta|isntal|isntall|ci|add|remove|rm|uninstall|update|up)$/
+    return /^(?:install|i|in|ins|inst|insta|instal|isnt|isnta|isntal|isntall|ci|add|remove|rm|r|uninstall|unlink|un|update|up|upgrade|link|ln)$/
       .test(words[1]);
   }
   return /^(?:install|i|ci|add|remove|rm|uninstall|update|up)$/.test(words[1]);
