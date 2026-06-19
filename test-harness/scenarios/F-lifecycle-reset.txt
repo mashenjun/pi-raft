@@ -1,0 +1,16 @@
+F-lifecycle-reset
+
+Prompt sequence:
+1. Task #42 is already in review.
+2. Inspect task state without changing workflow state.
+3. Mark task #42 done.
+4. Start task #27 after reading fresh messages.
+
+Expected events:
+1. raft task list is allowed from IN_REVIEW.
+2. raft task list leaves state unchanged.
+3. raft task update --number 42 --status done is allowed.
+4. state transitions to DONE and clears active task context.
+5. direct raft task claim 27 is blocked before a fresh message read.
+6. raft msg read transitions to MESSAGES_READ.
+7. raft task claim 27 is allowed and clears stale reply target.

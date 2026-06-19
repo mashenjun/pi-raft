@@ -234,6 +234,81 @@ describe("pi-raft extension integration", () => {
     expect(harness.appended).toHaveLength(appendCount);
   });
 
+  it("allows raft task list as a read-only no-op from IN_REVIEW", async () => {
+    const harness = createHarness();
+    await reachInReview(harness);
+    const appendCount = harness.appended.length;
+
+    expect(
+      await harness.emit("tool_call", bash('raft task list --channel "#pi-raft"')),
+    ).toBeUndefined();
+
+    expect(latestState(harness)).toMatchObject({
+      currentState: "IN_REVIEW",
+      taskId: "42",
+    });
+    expect(harness.appended).toHaveLength(appendCount);
+  });
+
+  it("allows task completion and the next task claim after a fresh read", async () => {
+    const harness = createHarness();
+    await reachInReview(harness);
+
+    expect(
+      await harness.emit("tool_call", bash("raft task update --number 42 --status done")),
+    ).toBeUndefined();
+    expect(latestState(harness)).toMatchObject({
+      currentState: "DONE",
+      taskId: null,
+      replyTarget: null,
+    });
+
+    const directClaim = await harness.emit("tool_call", bash("raft task claim 27"));
+    expect(directClaim).toMatchObject({ block: true });
+    expect(directClaim.reason).toContain("msg read");
+
+    expect(await harness.emit("tool_call", bash("raft msg read --channel general"))).toBeUndefined();
+    expect(latestState(harness).currentState).toBe("MESSAGES_READ");
+
+    expect(await harness.emit("tool_call", bash("raft task claim 27"))).toBeUndefined();
+    expect(latestState(harness)).toMatchObject({
+      currentState: "TASK_CLAIMED",
+      taskId: "27",
+      replyTarget: null,
+    });
+  });
+
+  it("blocks normalized raft message send before IN_REVIEW and stores its target when allowed", async () => {
+    const harness = createHarness();
+    await reachClaimed(harness);
+
+    const blocked = await harness.emit(
+      "tool_call",
+      bash('raft message send --target "#pi-raft:a70a2306" "too early"'),
+    );
+    expect(blocked).toMatchObject({ block: true });
+    expect(blocked.reason).toContain("in_review");
+
+    expect(
+      await harness.emit("tool_call", bash("raft task update --number 42 --status in_review")),
+    ).toBeUndefined();
+    expect(
+      await harness.emit(
+        "tool_call",
+        bash('raft message send --target "#pi-raft:a70a2306" "done"'),
+      ),
+    ).toBeUndefined();
+
+    expect(latestState(harness)).toMatchObject({
+      currentState: "DONE",
+      taskId: "42",
+      replyTarget: {
+        channel: "#pi-raft",
+        threadTs: "a70a2306",
+      },
+    });
+  });
+
   it("restores persisted state before injecting context", async () => {
     const harness = createHarness([
       {
