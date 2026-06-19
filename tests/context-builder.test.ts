@@ -23,7 +23,8 @@ describe("buildSlockContext — compact", () => {
     const ctx = buildSlockContext(state({ currentState: "TASK_CLAIMED", taskId: "42" }));
     expect(ctx).toContain("State: TASK_CLAIMED");
     expect(ctx).toContain("Task: #42");
-    expect(ctx).toContain("raft task status in_review");
+    expect(ctx).toContain("raft task update");
+    expect(ctx).toContain("--status in_review");
   });
 
   it("formats DONE state", () => {

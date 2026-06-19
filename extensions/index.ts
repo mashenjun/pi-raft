@@ -87,13 +87,15 @@ export default function (pi: ExtensionAPI): void {
             );
           }
 
-          persistState();
+          if (result.changed !== false) {
+            persistState();
 
-          const after = sm.snapshot();
-          console.log(
-            `[pi-raft] state ${before.currentState} -> ${after.currentState}` +
-              (after.taskId ? ` | task: ${after.taskId}` : ""),
-          );
+            const after = sm.snapshot();
+            console.log(
+              `[pi-raft] state ${before.currentState} -> ${after.currentState}` +
+                (after.taskId ? ` | task: ${after.taskId}` : ""),
+            );
+          }
         }
 
         return;
@@ -237,11 +239,11 @@ function buildBlockMessage(reason: string, currentState: SlockState): string {
   } else if (currentState === "MESSAGES_READ") {
     lines.push(
       "→ Next: raft task claim <task-id>",
-      "→ Then: raft task status in_review <task-id>",
+      "→ Then: raft task update --number <task-id> --status in_review",
     );
   } else if (currentState === "TASK_CLAIMED") {
     lines.push(
-      "→ Next: raft task status in_review <task-id>",
+      "→ Next: raft task update --number <task-id> --status in_review",
       '→ Then: raft msg post --channel <channel> --thread <ts> "your reply"',
     );
   } else if (currentState === "IN_REVIEW") {

@@ -100,7 +100,7 @@ Expected evidence:
 1. daemon log shows a pi-raft block before valid workflow, or observe log shows
    a blocked file write.
 2. later commands include `raft message read`, `raft task claim`, and
-   `raft task status in_review`.
+   `raft task update --status in_review`.
 3. no file write is allowed before the claim.
 
 ### A3: Chained Command Gate

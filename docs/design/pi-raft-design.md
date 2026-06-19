@@ -21,7 +21,7 @@ status (see Experiment Findings below):
 | P2 | Agent does not claim tasks (causes parallel conflicts) | Pre-condition enforcement | YES (F5) | 1/3 runs skip explicit claim |
 | P3 | Agent replies to wrong target | Context injection | NOT CONFIRMED | 3/3 runs correct thread target |
 | P4 | Cross-turn context loss (no state across turns) | State persistence | UNTESTED | Synthetic tasks complete instantly |
-| P5 | Agent forgets `raft task status in_review` | Context injection | PARTIAL | Sometimes present, sometimes absent |
+| P5 | Agent forgets `raft task update --status in_review` | Context injection | PARTIAL | Sometimes present, sometimes absent |
 | P6 | Agent leaks credentials in public channels | Content scanning | STRONG YES (F2, F7) | Explicitly says "won't repost" then reposts |
 | P7 | Agent chains multiple raft commands in one shell call | Structural enforcement | STRONG YES (F1, F10) | 100% freq: `claim && update` in single bash |
 | P8 | Overall: missing slock workflow discipline | Documentation | IMPLICIT | All other findings confirm |
@@ -145,7 +145,7 @@ slock workflow is a linear state machine with well-defined transitions:
       │                                       ▼
       │                                 TASK_CLAIMED
       │                                       │
-      │                              raft task status in_review
+      │                              raft task update --status in_review
       │                                       │
       │                                       ▼
       │                                  IN_REVIEW
@@ -164,8 +164,8 @@ slock workflow is a linear state machine with well-defined transitions:
 |-------|---------|-----------------|
 | `IDLE` | Session start or task completed | Only `raft msg read` (or other read-only ops) |
 | `MESSAGES_READ` | Messages have been read | `raft task claim`, `raft msg read` (re-read) |
-| `TASK_CLAIMED` | A task has been claimed | `raft task status in_review`, read/edit files |
-| `IN_REVIEW` | Working on the task | All file operations, `raft task status` updates |
+| `TASK_CLAIMED` | A task has been claimed | `raft task update --status in_review`, read/edit files |
+| `IN_REVIEW` | Working on the task | All file operations, status updates |
 | `DONE` | Task completed, reply posted | `raft msg read` (reset to `IDLE` for next task) |
 
 **Enforcement rules:**
@@ -174,7 +174,7 @@ slock workflow is a linear state machine with well-defined transitions:
 - **`raft` commands that modify state**: parsed from bash; transitions
   validated against current state
 - **`raft task claim` without prior `raft msg read`**: blocked
-- **`raft msg post` without prior `raft task status in_review`**: blocked
+- **`raft msg post` without prior `raft task update --status in_review`**: blocked
 
 ### State Persistence
 
@@ -269,7 +269,7 @@ pi.on("before_agent_start", async (event, ctx) => {
 |-------------|----------|
 | Current state | e.g., `TASK_CLAIMED` |
 | Claimed task ID | e.g., `#42: fix auth timeout` |
-| Expected next action | e.g., `raft task status in_review 42` |
+| Expected next action | e.g., `raft task update --number 42 --status in_review` |
 | Reply target | Channel + thread_ts (if known) |
 | Pending reminders | "Remember to update task status after making changes" |
 | Skill reference | "Use `/skill:pi-raft` to review the full workflow" |
@@ -297,7 +297,7 @@ Rationale:
 - False positives are acceptable -- a blocked non-raft command costs a retry, not data loss
 
 **Why this matters**: Experiment confirmed chaining is the default behavior (F1:
-`raft task claim N && raft task update N --status in_review` in every scenario
+`raft task claim N && raft task update --number N --status in_review` in every scenario
 involving both operations). 100% of claim+update operations use shell chaining
 operators. The parser is the only defense against this.
 
@@ -505,7 +505,7 @@ Agent receives notification about new messages.
 | 2 | Agent runs `raft msg read --channel general` | ALLOW + state → `MESSAGES_READ` | State entry written to session |
 | 3 | Agent tries `write` before claiming | BLOCK: "write requires a claimed task" | Block event with reason containing "task claim" |
 | 4 | Agent runs `raft task claim 42` | ALLOW + state → `TASK_CLAIMED`, taskId=42 stored | State entry with taskId=42 |
-| 5 | Agent runs `raft task status in_review 42` | ALLOW + state → `IN_REVIEW` | State transition recorded |
+| 5 | Agent runs `raft task update --number 42 --status in_review` | ALLOW + state → `IN_REVIEW` | State transition recorded |
 | 6 | Agent runs `write` / `edit` (now allowed) | ALLOW | File operation in log, no block |
 | 7 | Agent runs `raft msg post --channel general --thread ts_abc "done"` | ALLOW + state → `DONE` | Reply target matches expected |
 
@@ -554,7 +554,7 @@ Turn 2: "Continue working on task #42."
 | Step | Agent action | pi-raft response | Assertion |
 |------|-------------|------------------|-----------|
 | 1 | Agent runs `raft task claim 42` | ALLOW, state persisted | State entry with taskId=42 |
-| 2 | Agent runs `raft task status in_review 42` | ALLOW | State → `IN_REVIEW` |
+| 2 | Agent runs `raft task update --number 42 --status in_review` | ALLOW | State → `IN_REVIEW` |
 | 3 | Agent writes some code | ALLOW | File operations in log |
 | 4 | -- compaction -- | pi-raft state survives in session branch | `session_start` in turn 2 recovers state |
 | 5 | Turn 2: agent tries `write` immediately | ALLOW (state = `IN_REVIEW` recovered from branch) | No block -- agent remembers the task |
@@ -677,10 +677,13 @@ esac
    The state machine allows `raft msg read` from any state. Re-reading is never
    blocked -- only forward transitions are validated.
 
-4. **Does the extension need to handle `raft` command failures?** If `raft
-   task claim` fails (task already claimed), the agent receives the error from
-   bash. pi-raft validates the *attempt*, not the success. State only transitions
-   on confirmed success (detectable via `tool_result` hook).
+4. **Does the extension need to handle `raft` command failures?** Current
+   enforcement runs in `tool_call`, before the CLI exits. pi-raft validates the
+   command shape and intended transition, not the eventual slock result. This is
+   why state transitions must be conservative: read-only commands like
+   `raft task status --help` are no-ops, and `IN_REVIEW` only follows the real
+   mutating command `raft task update --status in_review`. Confirmed-success
+   synchronization would require a future post-execution hook.
 
 5. **How to handle the auto-claim race condition (P12)?** Experiment E R2-R3
    showed the agent claims tasks within seconds of creation, before the tester
@@ -695,7 +698,14 @@ esac
    identical commands in a future version.
 
 7. **How does chaining interact with state transitions?** When the agent runs
-   `raft task claim N && raft task update N --status in_review`, pi-raft blocks
+   `raft task claim N && raft task update --number N --status in_review`, pi-raft blocks
    the entire call (P7 enforcement). The agent must split into two separate
    calls. The state machine should then recognize claim → TASK_CLAIMED, then
    status update → IN_REVIEW as two separate valid transitions.
+
+8. **Should read-only review or analysis require task claims?** This is a policy
+   gap, not a state-machine bug. pi-raft can block protected operations such as
+   writes, message posts, and invalid raft transitions. It cannot infer intent
+   from read-only shell commands like `find`, `rg`, or `cat`. If review-only repo
+   analysis must require claims, slock policy or prompt/context rules must define
+   that expectation explicitly.

@@ -122,7 +122,7 @@ async function reachClaimed(harness: Harness): Promise<void> {
 async function reachInReview(harness: Harness): Promise<void> {
   await reachClaimed(harness);
   expect(
-    await harness.emit("tool_call", bash("raft task status in_review 42")),
+    await harness.emit("tool_call", bash("raft task update --number 42 --status in_review")),
   ).toBeUndefined();
 }
 
@@ -144,7 +144,7 @@ describe("pi-raft extension integration", () => {
     });
 
     expect(
-      await harness.emit("tool_call", bash("raft task status in_review 42")),
+      await harness.emit("tool_call", bash("raft task update --number 42 --status in_review")),
     ).toBeUndefined();
     expect(latestState(harness).currentState).toBe("IN_REVIEW");
 
@@ -219,6 +219,19 @@ describe("pi-raft extension integration", () => {
     expect(result).toMatchObject({ block: true });
     expect(result.reason).toContain("Multiple raft commands");
     expect(harness.appended).toHaveLength(0);
+  });
+
+  it("does not advance state on raft task help commands", async () => {
+    const harness = createHarness();
+    await reachClaimed(harness);
+    const appendCount = harness.appended.length;
+
+    expect(await harness.emit("tool_call", bash("raft task status --help"))).toBeUndefined();
+    expect(latestState(harness).currentState).toBe("TASK_CLAIMED");
+
+    expect(await harness.emit("tool_call", bash("raft task update --help"))).toBeUndefined();
+    expect(latestState(harness).currentState).toBe("TASK_CLAIMED");
+    expect(harness.appended).toHaveLength(appendCount);
   });
 
   it("restores persisted state before injecting context", async () => {

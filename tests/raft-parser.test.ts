@@ -23,10 +23,11 @@ describe("parseRaftCommands", () => {
     expect(result[0].args["0"]).toBe("42");
   });
 
-  it("parses raft task status command", () => {
-    const result = parseRaftCommands("raft task status in_review 42");
+  it("parses raft task status inspection command", () => {
+    const result = parseRaftCommands("raft task status --help");
     expect(result).toHaveLength(1);
     expect(result[0]).toMatchObject({ noun: "task", verb: "status" });
+    expect(result[0].args.help).toBe("true");
   });
 
   it("parses raft msg post command", () => {
