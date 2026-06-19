@@ -12,6 +12,11 @@ interact with slock via `raft` CLI. pi-agent will auto-report its internal
 actions (bash commands, file writes) to a dedicated observation channel —
 you read that channel to see what pi-agent actually did.
 
+This document is the original pre-implementation behavior experiment. For the
+current post-install test suite that verifies pi-raft is active and measures
+pik's remaining coding weaknesses, use
+[pik behavior test plan](./pik-behavior-test.md).
+
 **Your role**: set up the scenario, wait for pi-agent to act, read both the
 observation channel and the public channel, fill out the verdict. No human
 in the loop.
