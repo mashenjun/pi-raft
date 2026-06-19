@@ -376,15 +376,27 @@ function hasFreshWorkIntent(text: string, taskId: string | null): boolean {
 function mentionsRejectedTaskId(text: string, taskId: string): boolean {
   const escaped = taskId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const oldTaskPattern = String.raw`(?:task\s*#?${escaped}|#${escaped})(?!\d)`;
+  const negatedCompletionAction =
+    String.raw`(?:do not|don't|dont|never|no longer)\s+` +
+    String.raw`(?:complete|finish)\b`;
   const negatedActiveTaskAction =
     String.raw`(?:do not|don't|dont|never|no longer)\s+` +
     String.raw`(?:work\s+on|use|handle|continue|resume|keep\s+working\s+on|carry\s+on\s+with|claim)\b`;
+  const rejectsCompletion = new RegExp(String.raw`\b${negatedCompletionAction}.{0,40}${oldTaskPattern}`)
+    .test(text);
+  if (rejectsCompletion && !hasExplicitContinuationIntent(text)) {
+    return true;
+  }
   return new RegExp(String.raw`\b(?:ignore|stop|drop|abandon|discard|cancel)\b.{0,30}${oldTaskPattern}`)
     .test(text) ||
     new RegExp(String.raw`${oldTaskPattern}.{0,30}\b(?:ignore|stop|drop|abandon|discard|cancel)\b`)
       .test(text) ||
     new RegExp(String.raw`\b${negatedActiveTaskAction}.{0,40}${oldTaskPattern}`)
       .test(text);
+}
+
+function hasExplicitContinuationIntent(text: string): boolean {
+  return /\b(continue|resume|keep working|carry on|same task)\b/.test(text);
 }
 
 function isApprovalCompletionPrompt(text: string): boolean {
@@ -959,6 +971,24 @@ function collectEnvSplitStringPayloads(words: string[], start: number, payloads:
       payloads.push(word.slice("--split-string=".length));
       return;
     }
+    if (/^-[^-]\S*$/.test(word)) {
+      const chars = word.slice(1);
+      for (let pos = 0; pos < chars.length; pos++) {
+        const char = chars[pos];
+        if (char === "S") {
+          const attachedPayload = chars.slice(pos + 1);
+          if (attachedPayload !== "") {
+            payloads.push(attachedPayload);
+          } else if (i + 1 < words.length) {
+            payloads.push(words[i + 1]);
+          }
+          return;
+        }
+        if (envShortOptionNeedsValue(char)) {
+          return;
+        }
+      }
+    }
 
     i = skipEnvOption(words, i);
   }
@@ -1156,7 +1186,9 @@ function gitOptionArgsBeforePathspec(args: string[]): string[] {
 }
 
 function gitPathspecOptionNeedsValue(option: string): boolean {
-  return option === "--pathspec-from-file";
+  const canonical = "--pathspec-from-file";
+  return option === canonical ||
+    (option.length > "--pathspec-from-".length && canonical.startsWith(option));
 }
 
 function gitSubcommandIndex(words: string[]): number {
@@ -1207,7 +1239,7 @@ function isMutatingPackageManagerSegment(segment: string): boolean {
     return false;
   }
   if (executable === "npm") {
-    return /^(?:install|i|in|ins|inst|insta|instal|isnt|isnta|isntal|isntall|ci|add|remove|rm|r|uninstall|unlink|un|update|up|upgrade|link|ln)$/
+    return /^(?:install|i|in|ins|inst|insta|instal|isnt|isnta|isntal|isntall|ci|add|remove|rm|r|uninstall|unlink|un|update|up|upgrade|udpate|link|ln)$/
       .test(words[1]);
   }
   return /^(?:install|i|ci|add|remove|rm|uninstall|update|up)$/.test(words[1]);
