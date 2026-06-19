@@ -376,9 +376,14 @@ function hasFreshWorkIntent(text: string, taskId: string | null): boolean {
 function mentionsRejectedTaskId(text: string, taskId: string): boolean {
   const escaped = taskId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const oldTaskPattern = String.raw`(?:task\s*#?${escaped}|#${escaped})(?!\d)`;
+  const negatedActiveTaskAction =
+    String.raw`(?:do not|don't|dont|never|no longer)\s+` +
+    String.raw`(?:work\s+on|use|handle|continue|resume|keep\s+working\s+on|carry\s+on\s+with|claim|complete|finish)\b`;
   return new RegExp(String.raw`\b(?:ignore|stop|drop|abandon|discard|cancel)\b.{0,30}${oldTaskPattern}`)
     .test(text) ||
     new RegExp(String.raw`${oldTaskPattern}.{0,30}\b(?:ignore|stop|drop|abandon|discard|cancel)\b`)
+      .test(text) ||
+    new RegExp(String.raw`\b${negatedActiveTaskAction}.{0,40}${oldTaskPattern}`)
       .test(text);
 }
 
@@ -994,7 +999,9 @@ function shellWords(input: string): string[] {
 function isMutatingShellSegment(segment: string, depth = 0): boolean {
   const words = shellWords(segment);
   const commandIndex = executableWordIndex(words);
-  const normalized = commandIndex === -1 ? "" : words.slice(commandIndex).join(" ");
+  const normalized = commandIndex === -1
+    ? ""
+    : [commandBaseName(words[commandIndex]), ...words.slice(commandIndex + 1)].join(" ");
   return isSudoEditSegment(segment) ||
     /^(?:touch|mkdir|mv|cp|rm|chmod|chown|install|tee)\b/.test(normalized) ||
     isSedInPlaceSegment(normalized) ||
@@ -1012,6 +1019,9 @@ function isSudoEditSegment(segment: string): boolean {
   let i = 0;
   while (i < words.length && commandBaseName(words[i]) === "env") {
     i = skipEnvPrefix(words, i + 1);
+  }
+  if (i >= words.length) {
+    return false;
   }
   if (commandBaseName(words[i]) === "sudoedit") {
     return !words.slice(i + 1).some(isHelpOption);
@@ -1036,10 +1046,27 @@ function isSudoEditSegment(segment: string): boolean {
       i = skipSudoOption(words, i);
       continue;
     }
-    if (/^-[^-]\S*$/.test(word) && word.slice(1).includes("e")) {
+    if (sudoShortOptionHasEditMode(word)) {
       return true;
     }
     i = skipSudoOption(words, i);
+  }
+  return false;
+}
+
+function sudoShortOptionHasEditMode(word: string): boolean {
+  if (!/^-[^-]\S*$/.test(word)) {
+    return false;
+  }
+  const chars = word.slice(1);
+  for (let pos = 0; pos < chars.length; pos++) {
+    const option = chars[pos];
+    if (option === "e") {
+      return true;
+    }
+    if (sudoShortOptionNeedsValue(option)) {
+      return false;
+    }
   }
   return false;
 }
@@ -1080,7 +1107,8 @@ function isMutatingGitSegment(segment: string): boolean {
   }
   if (subcommand === "rm" || subcommand === "mv") {
     const args = words.slice(subcommandIndex + 1);
-    return !args.some(isGitDryRunOption) && !args.some(isHelpOption);
+    const optionArgs = gitOptionArgsBeforePathspec(args);
+    return !optionArgs.some(isGitDryRunOption) && !optionArgs.some(isHelpOption);
   }
   if (subcommand === "clean") {
     return !words.slice(subcommandIndex + 1).some(isGitDryRunOption);
@@ -1095,6 +1123,17 @@ function isMutatingGitSegment(segment: string): boolean {
     return words.length > subcommandIndex + 1 && !words.slice(subcommandIndex + 1).some(isHelpOption);
   }
   return false;
+}
+
+function gitOptionArgsBeforePathspec(args: string[]): string[] {
+  const result: string[] = [];
+  for (const arg of args) {
+    if (arg === "--") {
+      break;
+    }
+    result.push(arg);
+  }
+  return result;
 }
 
 function gitSubcommandIndex(words: string[]): number {
@@ -1144,11 +1183,22 @@ function isMutatingPackageManagerSegment(segment: string): boolean {
   if (words.slice(1).some(isPackageDryRunOption)) {
     return false;
   }
+  if (executable === "npm") {
+    return /^(?:install|i|in|ins|inst|insta|instal|isnt|isnta|isntal|isntall|ci|add|remove|rm|uninstall|update|up)$/
+      .test(words[1]);
+  }
   return /^(?:install|i|ci|add|remove|rm|uninstall|update|up)$/.test(words[1]);
 }
 
 function isPackageDryRunOption(word: string): boolean {
-  return word === "--dry-run" || word.startsWith("--dry-run=");
+  if (word === "--dry-run") {
+    return true;
+  }
+  if (!word.startsWith("--dry-run=")) {
+    return false;
+  }
+  const value = word.slice("--dry-run=".length).toLowerCase();
+  return value === "" || value === "true" || value === "1" || value === "yes" || value === "on";
 }
 
 function isPatchSegment(segment: string): boolean {

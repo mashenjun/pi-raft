@@ -307,6 +307,7 @@ describe("pi-raft extension integration", () => {
       "git switch feature",
       "git rm tracked.ts",
       "git mv old.ts new.ts",
+      "git rm -- -h",
     ]) {
       const result = await harness.emit("tool_call", bash(command));
       expect(result).toMatchObject({ block: true });
@@ -335,6 +336,10 @@ describe("pi-raft extension integration", () => {
     expect(await harness.emit("tool_call", bash("sudo -k"))).toBeUndefined();
     expect(await harness.emit("tool_call", bash("sudo --reset-timestamp"))).toBeUndefined();
     expect(await harness.emit("tool_call", bash("sudo -K"))).toBeUndefined();
+    expect(await harness.emit("tool_call", bash("env -i"))).toBeUndefined();
+    expect(await harness.emit("tool_call", bash("env FOO=bar"))).toBeUndefined();
+    expect(await harness.emit("tool_call", bash("sudo -udev id"))).toBeUndefined();
+    expect(await harness.emit("tool_call", bash("sudo -gwheel id"))).toBeUndefined();
     expect(harness.appended).toHaveLength(0);
 
     const result = await harness.emit("tool_call", bash("sudo -u root touch file.txt"));
@@ -357,7 +362,15 @@ describe("pi-raft extension integration", () => {
   it("blocks package manager install aliases before the claim gate", async () => {
     const harness = createHarness();
 
-    for (const command of ["npm ci", "npm i", "pnpm i", "yarn install", "bun install"]) {
+    for (const command of [
+      "npm ci",
+      "npm i",
+      "npm in",
+      "npm ins lodash",
+      "pnpm i",
+      "yarn install",
+      "bun install",
+    ]) {
       const result = await harness.emit("tool_call", bash(command));
       expect(result).toMatchObject({ block: true });
       expect(result.reason).toContain("shell file mutation");
@@ -365,6 +378,16 @@ describe("pi-raft extension integration", () => {
     }
 
     expect(await harness.emit("tool_call", bash("npm ci --dry-run"))).toBeUndefined();
+    expect(await harness.emit("tool_call", bash("npm install --dry-run=true"))).toBeUndefined();
+    for (const command of [
+      "npm ci --dry-run=false",
+      "npm ci --dry-run=0",
+      "npm ci --dry-run=no",
+    ]) {
+      const result = await harness.emit("tool_call", bash(command));
+      expect(result).toMatchObject({ block: true });
+      expect(result.reason).toContain("shell file mutation");
+    }
     await reachClaimed(harness);
     expect(await harness.emit("tool_call", bash("npm ci"))).toBeUndefined();
   });
@@ -378,6 +401,7 @@ describe("pi-raft extension integration", () => {
       "patch -p1 < fix.patch",
       "find . -name '*.tmp' -delete",
       "find . -name x -exec touch {} ';'",
+      "find . -name x -exec /bin/rm {} ';'",
       "find . -name x -execdir sh -c 'touch file.txt' ';'",
     ]) {
       const result = await harness.emit("tool_call", bash(command));
@@ -951,36 +975,41 @@ describe("pi-raft extension integration", () => {
   });
 
   it("resets stale state when prompt rejects the old task by id", async () => {
-    const harness = createHarness([
-      {
-        type: "custom",
-        customType: "pi-raft-state",
-        data: {
-          currentState: "IN_REVIEW",
-          taskId: "42",
-          replyTarget: null,
+    for (const prompt of [
+      "Ignore task #42 and update README.",
+      "Do not work on task #42; update README.",
+    ]) {
+      const harness = createHarness([
+        {
+          type: "custom",
+          customType: "pi-raft-state",
+          data: {
+            currentState: "IN_REVIEW",
+            taskId: "42",
+            replyTarget: null,
+          },
         },
-      },
-    ]);
+      ]);
 
-    await harness.emit("session_start", { type: "session_start", reason: "reload" });
-    const promptResult = await harness.emit("before_agent_start", {
-      type: "before_agent_start",
-      prompt: "Ignore task #42 and update README.",
-      systemPrompt: "base",
-      systemPromptOptions: {},
-    });
+      await harness.emit("session_start", { type: "session_start", reason: "reload" });
+      const promptResult = await harness.emit("before_agent_start", {
+        type: "before_agent_start",
+        prompt,
+        systemPrompt: "base",
+        systemPromptOptions: {},
+      });
 
-    expect(promptResult.systemPrompt).toContain("[Slock] State: IDLE");
-    expect(latestState(harness)).toMatchObject({
-      currentState: "IDLE",
-      taskId: null,
-      replyTarget: null,
-    });
+      expect(promptResult.systemPrompt).toContain("[Slock] State: IDLE");
+      expect(latestState(harness)).toMatchObject({
+        currentState: "IDLE",
+        taskId: null,
+        replyTarget: null,
+      });
 
-    const result = await harness.emit("tool_call", write("console.log('fresh');"));
-    expect(result).toMatchObject({ block: true });
-    expect(result.reason).toContain("msg read");
+      const result = await harness.emit("tool_call", write("console.log('fresh');"));
+      expect(result).toMatchObject({ block: true });
+      expect(result.reason).toContain("msg read");
+    }
   });
 
   it("blocks stale prior-task completion after claiming the next task", async () => {
