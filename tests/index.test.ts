@@ -248,22 +248,34 @@ describe("pi-raft extension integration", () => {
   it("blocks tee after a pipe before the claim gate", async () => {
     const harness = createHarness();
 
-    const result = await harness.emit("tool_call", bash("echo data | tee file.txt"));
-
-    expect(result).toMatchObject({ block: true });
-    expect(result.reason).toContain("shell file mutation");
-    expect(result.reason).toContain("msg read");
+    for (const command of [
+      "echo data | tee file.txt",
+      "echo err |& tee file.txt",
+      "echo ok & touch file.txt",
+      "echo ok\n touch file.txt",
+    ]) {
+      const result = await harness.emit("tool_call", bash(command));
+      expect(result).toMatchObject({ block: true });
+      expect(result.reason).toContain("shell file mutation");
+      expect(result.reason).toContain("msg read");
+    }
     expect(harness.appended).toHaveLength(0);
   });
 
   it("blocks nested shell writes before the claim gate", async () => {
     const harness = createHarness();
 
-    const result = await harness.emit("tool_call", bash("bash -lc 'echo data > file.txt'"));
-
-    expect(result).toMatchObject({ block: true });
-    expect(result.reason).toContain("shell file redirection");
-    expect(result.reason).toContain("msg read");
+    for (const command of [
+      "bash -lc 'echo data > file.txt'",
+      "bash --norc -c 'touch file.txt'",
+      "env -i bash -lc 'touch file.txt'",
+      "sudo -u root bash -lc 'touch file.txt'",
+    ]) {
+      const result = await harness.emit("tool_call", bash(command));
+      expect(result).toMatchObject({ block: true });
+      expect(result.reason).toMatch(/shell file (redirection|mutation)/);
+      expect(result.reason).toContain("msg read");
+    }
     expect(harness.appended).toHaveLength(0);
   });
 
@@ -275,6 +287,8 @@ describe("pi-raft extension integration", () => {
       "git clean -fd",
       "git reset --hard",
       "git checkout -- README.md",
+      "git checkout main",
+      "git switch feature",
     ]) {
       const result = await harness.emit("tool_call", bash(command));
       expect(result).toMatchObject({ block: true });
@@ -284,12 +298,21 @@ describe("pi-raft extension integration", () => {
     expect(harness.appended).toHaveLength(0);
   });
 
+  it("allows git clean dry-runs before the claim gate", async () => {
+    const harness = createHarness();
+
+    expect(await harness.emit("tool_call", bash("git clean -nd"))).toBeUndefined();
+    expect(await harness.emit("tool_call", bash("git clean --dry-run -d"))).toBeUndefined();
+    expect(harness.appended).toHaveLength(0);
+  });
+
   it("blocks tar extraction before the claim gate", async () => {
     const harness = createHarness();
 
     for (const command of [
       "tar -xzf archive.tgz",
       "tar xf archive.tar",
+      "tar --get -f archive.tar",
     ]) {
       const result = await harness.emit("tool_call", bash(command));
       expect(result).toMatchObject({ block: true });
@@ -297,6 +320,25 @@ describe("pi-raft extension integration", () => {
       expect(result.reason).toContain("msg read");
     }
     expect(harness.appended).toHaveLength(0);
+  });
+
+  it("blocks shell mutations after raft commands that clear the active claim", async () => {
+    const harness = createHarness();
+    await reachInReview(harness);
+    const appendCount = harness.appended.length;
+
+    const result = await harness.emit(
+      "tool_call",
+      bash("raft msg read --channel general && echo data > file.txt"),
+    );
+
+    expect(result).toMatchObject({ block: true });
+    expect(result.reason).toContain("clears the active claim");
+    expect(harness.appended).toHaveLength(appendCount);
+    expect(latestState(harness)).toMatchObject({
+      currentState: "IN_REVIEW",
+      taskId: "42",
+    });
   });
 
   it("allows shell file redirection after a task is claimed", async () => {
@@ -575,6 +617,59 @@ describe("pi-raft extension integration", () => {
       taskId: null,
       replyTarget: null,
     });
+  });
+
+  it("preserves approval-only DONE prompts", async () => {
+    for (const prompt of ["LGTM", "Looks good", "Approved"]) {
+      const harness = createHarness([
+        {
+          type: "custom",
+          customType: "pi-raft-state",
+          data: {
+            currentState: "DONE",
+            taskId: "42",
+            replyTarget: { channel: "general", threadTs: "ts_abc" },
+          },
+        },
+      ]);
+
+      await harness.emit("session_start", { type: "session_start", reason: "reload" });
+      const promptResult = await harness.emit("before_agent_start", {
+        type: "before_agent_start",
+        prompt,
+        systemPrompt: "base",
+        systemPromptOptions: {},
+      });
+
+      expect(promptResult.systemPrompt).toContain("[Slock] State: DONE");
+      expect(promptResult.systemPrompt).toContain("Task: #42");
+    }
+  });
+
+  it("ignores unrelated bare issue numbers during same-task continuation", async () => {
+    const harness = createHarness([
+      {
+        type: "custom",
+        customType: "pi-raft-state",
+        data: {
+          currentState: "IN_REVIEW",
+          taskId: "42",
+          replyTarget: null,
+        },
+      },
+    ]);
+
+    await harness.emit("session_start", { type: "session_start", reason: "reload" });
+    const promptResult = await harness.emit("before_agent_start", {
+      type: "before_agent_start",
+      prompt: "Continue task #42 for GitHub issue #13.",
+      systemPrompt: "base",
+      systemPromptOptions: {},
+    });
+
+    expect(promptResult.systemPrompt).toContain("[Slock] State: IN_REVIEW");
+    expect(promptResult.systemPrompt).toContain("Task: #42");
+    expect(await harness.emit("tool_call", write("console.log('same task');"))).toBeUndefined();
   });
 
   it("resets stale state when a prompt mentions the old task but assigns a new task", async () => {
