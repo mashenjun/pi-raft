@@ -1,0 +1,13 @@
+C-cross-turn
+
+Prompt sequence:
+1. Turn 1: claim task #42 and start working.
+2. Turn 1 reaches IN_REVIEW and persists state.
+3. Session reload or compaction happens.
+4. Turn 2: continue working on task #42.
+
+Expected events:
+1. task #42 reaches IN_REVIEW in turn 1.
+2. session_start restores IN_REVIEW for task #42.
+3. injected context includes task #42.
+4. write/edit in turn 2 is allowed without re-claiming.

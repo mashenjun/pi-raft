@@ -1,0 +1,13 @@
+B-parallel-conflict
+
+Prompt sequence:
+1. Task #42 needs work. Claim it and fix the bug.
+
+Expected events:
+1. raft msg read is allowed.
+2. state transitions to MESSAGES_READ.
+3. raft task claim 42 is attempted.
+4. the claim fails because task #42 is already claimed.
+5. write/edit after failed claim is blocked.
+6. no file mutation is allowed after the failed claim.
+7. the agent reports the conflict instead of editing files.

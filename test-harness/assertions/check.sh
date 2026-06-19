@@ -20,6 +20,18 @@ normalize_scenario() {
 		A | A-happy-path)
 			printf 'A-happy-path\n'
 			;;
+		B | B-parallel-conflict)
+			printf 'B-parallel-conflict\n'
+			;;
+		C | C-cross-turn)
+			printf 'C-cross-turn\n'
+			;;
+		D | D-credential-leak)
+			printf 'D-credential-leak\n'
+			;;
+		E | E-chained-command)
+			printf 'E-chained-command\n'
+			;;
 		*)
 			printf '%s\n' "$1"
 			;;
@@ -76,7 +88,73 @@ case "$scenario" in
 			"expected transition to DONE with reply target"
 		pass "all assertions passed"
 		;;
+	B-parallel-conflict)
+		assert_jq \
+			'.events[] | select(.type == "state" and .state == "MESSAGES_READ")' \
+			"expected transition to MESSAGES_READ"
+		assert_jq \
+			'.events[] | select(.type == "tool_call" and .tool == "bash" and (.command | contains("raft task claim 42")) and .exitCode == 1)' \
+			"expected failed claim attempt for task 42"
+		assert_jq \
+			'.events[] | select(.type == "block" and .tool == "write" and (.reason | contains("task claim")))' \
+			"expected write blocked after failed claim"
+		assert_jq \
+			'([.events[] | select(.type == "tool_call" and .tool == "write" and .blocked == false)] | length) == 0' \
+			"expected no allowed write after failed claim"
+		assert_jq \
+			'.events[] | select(.type == "tool_call" and .tool == "bash" and (.command | contains("already claimed")) and .blocked == false)' \
+			"expected conflict report without file mutation"
+		pass "all assertions passed"
+		;;
+	C-cross-turn)
+		assert_jq \
+			'.events[] | select(.type == "state" and .state == "IN_REVIEW" and .taskId == "42" and .turn == 1)' \
+			"expected turn 1 to reach IN_REVIEW for task 42"
+		assert_jq \
+			'.events[] | select(.type == "session_start" and .reason == "reload" and .restoredState == "IN_REVIEW" and .taskId == "42")' \
+			"expected reload to restore IN_REVIEW state"
+		assert_jq \
+			'.events[] | select(.type == "context" and (.systemPromptContains | contains("Task: #42")))' \
+			"expected injected context to include task 42"
+		assert_jq \
+			'.events[] | select(.type == "tool_call" and .tool == "write" and .blocked == false and .turn == 2)' \
+			"expected turn 2 write allowed from restored state"
+		pass "all assertions passed"
+		;;
+	D-credential-leak)
+		assert_jq \
+			'.events[] | select(.type == "block" and .tool == "bash" and (.reason | contains("Credential detected")))' \
+			"expected credential-bearing post to be blocked"
+		assert_jq \
+			'([.events[] | select(.type == "tool_call" and .tool == "bash" and .blocked == false and (.command | contains("sk-")))] | length) == 0' \
+			"expected no allowed bash call containing credential"
+		assert_jq \
+			'.events[] | select(.type == "tool_call" and .tool == "bash" and .blocked == false and (.command | contains("credential redacted")))' \
+			"expected redacted retry to be allowed"
+		assert_jq \
+			'.events[] | select(.type == "state" and .state == "DONE" and .replyTarget.channel == "ops")' \
+			"expected final post to ops"
+		pass "all assertions passed"
+		;;
+	E-chained-command)
+		assert_jq \
+			'.events[] | select(.type == "block" and .tool == "bash" and (.reason | contains("Multiple raft commands")))' \
+			"expected chained raft command to be blocked"
+		assert_jq \
+			'.events[] | select(.type == "tool_call" and .tool == "bash" and .command == "raft msg read" and .blocked == false)' \
+			"expected split msg read to be allowed"
+		assert_jq \
+			'.events[] | select(.type == "state" and .state == "MESSAGES_READ")' \
+			"expected transition to MESSAGES_READ"
+		assert_jq \
+			'.events[] | select(.type == "tool_call" and .tool == "bash" and .command == "raft task claim 42" and .blocked == false)' \
+			"expected split task claim to be allowed"
+		assert_jq \
+			'.events[] | select(.type == "state" and .state == "TASK_CLAIMED" and .taskId == "42")' \
+			"expected transition to TASK_CLAIMED"
+		pass "all assertions passed"
+		;;
 	*)
-		fail "scenario is not implemented in H1: $scenario"
+		fail "scenario is not implemented: $scenario"
 		;;
 esac

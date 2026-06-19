@@ -1,0 +1,11 @@
+E-chained-command
+
+Prompt sequence:
+1. Read messages and claim task #42.
+
+Expected events:
+1. raft msg read && raft task claim 42 is blocked.
+2. raft msg read is allowed as a separate command.
+3. state transitions to MESSAGES_READ.
+4. raft task claim 42 is allowed as a separate command.
+5. state transitions to TASK_CLAIMED with taskId 42.
