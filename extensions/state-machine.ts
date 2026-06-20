@@ -51,10 +51,11 @@ export function createStateMachine(initial?: ActiveState): StateMachine {
       }
 
       const previousState = state.currentState;
-      if (isMismatchedTaskUpdateDone(state, action)) {
+      const invalidTaskUpdateReason = invalidMutatingTaskUpdateReason(state, action);
+      if (invalidTaskUpdateReason) {
         return {
           allowed: false,
-          reason: `task update done targets #${taskNumberFor(action)} but active task is #${state.taskId}`,
+          reason: invalidTaskUpdateReason,
         };
       }
 
@@ -69,7 +70,7 @@ export function createStateMachine(initial?: ActiveState): StateMachine {
         if (action.noun === "msg" && action.verb === "post") {
           state.replyTarget = replyTargetFor(action);
         }
-        if (isTaskUpdateDone(action) || (previousState === "DONE" && nextState === "MESSAGES_READ")) {
+        if (isTaskUpdateDone(action) || shouldClearActiveTask(previousState, nextState, action)) {
           state.taskId = null;
           state.replyTarget = null;
         }
@@ -92,6 +93,9 @@ export function createStateMachine(initial?: ActiveState): StateMachine {
       }
       if (state.currentState === "DONE") {
         return { allowed: false, reason: "must read messages first (raft msg read)" };
+      }
+      if (!state.taskId) {
+        return { allowed: false, reason: "must claim a task with an id first (raft task claim <id>)" };
       }
       return { allowed: true };
     },
@@ -122,11 +126,11 @@ function nextStateFor(currentState: SlockState, action: RaftAction): SlockState 
       if (isTaskClaim(action)) return "TASK_CLAIMED";
       return null;
     case "TASK_CLAIMED":
-      if (isMsgRead(action)) return "TASK_CLAIMED";
+      if (isMsgRead(action)) return "MESSAGES_READ";
       if (isTaskUpdateInReview(action)) return "IN_REVIEW";
       return null;
     case "IN_REVIEW":
-      if (isMsgRead(action)) return "IN_REVIEW";
+      if (isMsgRead(action)) return "MESSAGES_READ";
       if (isTaskUpdateInReview(action)) return "IN_REVIEW";
       if (isTaskUpdateDone(action)) return "DONE";
       if (isMsgPost(action)) return "DONE";
@@ -162,10 +166,30 @@ function isTaskUpdateDone(action: RaftAction): boolean {
     action.args.status === "done";
 }
 
-function isMismatchedTaskUpdateDone(state: ActiveState, action: RaftAction): boolean {
-  if (!isTaskUpdateDone(action) || !state.taskId) return false;
+function invalidMutatingTaskUpdateReason(state: ActiveState, action: RaftAction): string | null {
+  if (!isTaskUpdateMutating(action)) return null;
+  if (!state.taskId) {
+    return `task update --status ${action.args.status} requires an active claimed task id`;
+  }
   const taskNumber = taskNumberFor(action);
-  return taskNumber !== null && taskNumber !== state.taskId;
+  if (taskNumber !== null && taskNumber !== state.taskId) {
+    return `task update --status ${action.args.status} targets #${taskNumber} but active task is #${state.taskId}`;
+  }
+  return null;
+}
+
+function isTaskUpdateMutating(action: RaftAction): boolean {
+  return isTaskUpdateInReview(action) || isTaskUpdateDone(action);
+}
+
+function shouldClearActiveTask(
+  previousState: SlockState,
+  nextState: SlockState,
+  action: RaftAction,
+): boolean {
+  return isMsgRead(action) &&
+    nextState === "MESSAGES_READ" &&
+    previousState !== "MESSAGES_READ";
 }
 
 function taskNumberFor(action: RaftAction): string | null {

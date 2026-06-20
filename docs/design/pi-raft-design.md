@@ -157,20 +157,24 @@ IDLE ──raft msg read──► MESSAGES_READ ──raft task claim──► T
 |-------|---------|-----------------|
 | `IDLE` | Session start | Only `raft msg read` (or other read-only ops) |
 | `MESSAGES_READ` | Messages have been read | `raft task claim`, `raft msg read` (re-read) |
-| `TASK_CLAIMED` | A task has been claimed | `raft task update --status in_review`, read/edit files |
-| `IN_REVIEW` | Working on the task | All file operations, post reply, `raft task update --status done` |
+| `TASK_CLAIMED` | A task has been claimed | `raft task update --status in_review`, file operations for that task |
+| `IN_REVIEW` | Working on the task | File operations for that task, post reply, `raft task update --status done` |
 | `DONE` | Task completed or explicitly marked done | `raft msg read` (start next task cycle as `MESSAGES_READ`), `raft task update --status done` after approval |
 
 **Enforcement rules:**
 
-- **Write files (`write`, `edit`)**: allowed only in `TASK_CLAIMED` or
-  `IN_REVIEW`
+- **File mutations (`write`, `edit`, shell redirection/mutating shell commands)**:
+  allowed only with an active claimed task in `TASK_CLAIMED` or `IN_REVIEW`
 - **`raft` commands that modify state**: parsed from bash; transitions
   validated against current state
 - **`raft task claim` without prior `raft msg read`**: blocked
+- **`raft task update --number <id> --status in_review|done` for a different
+  task than the active claim**: blocked
 - **`raft msg post` without prior `raft task update --status in_review`**: blocked
 - **Read-only inspection** (`raft task list`, `raft task status`,
   `raft msg check`): allowed as no-op transitions from every state
+- **Fresh prompt or active-state `raft msg read`**: clears stale active task
+  context before allowing new work to proceed
 
 **Post semantics:**
 
@@ -227,13 +231,14 @@ Processing order within the handler:
    │   │   ├── validate against state machine
    │   │   │   ├── valid transition? → update state, ALLOW
    │   │   │   └── invalid? → P1/P2 BLOCK
-   │   │   └── no raft calls → scan for credentials
-   │   │       └── match? → P6 BLOCK
-   │   └── no raft calls → ALLOW
+   │   │   └── no raft calls → scan for credentials, then shell mutation gate
+   │   │       ├── credential match? → P6 BLOCK
+   │   │       ├── shell file mutation before active claim? → P2 BLOCK
+   │   │       └── otherwise ALLOW
    ├── "write" | "edit" → scan input for credential patterns
    │   ├── match? → P6 BLOCK (F2: credentials echoed in public reply)
-   │   └── check state >= TASK_CLAIMED
-   │       └── not claimed? → P2 BLOCK
+   │   └── check active task write gate
+   │       └── no active claimed task? → P2 BLOCK
    └── other → ALLOW
 ```
 
@@ -680,9 +685,12 @@ esac
    the agent processed the content. Experiment F3 confirms the agent fails
    to auto-discover tasks, but this is a reasoning issue, not enforceable.
 
-3. **What happens if the agent needs to run `raft msg read` mid-task?**
-   The state machine allows `raft msg read` from any state. Re-reading is never
-   blocked -- only forward transitions are validated.
+3. **What happens if the agent runs `raft msg read` mid-task?**
+   The state machine allows `raft msg read` from any state, but active-task
+   reads are treated as starting a fresh work cycle. From `TASK_CLAIMED`,
+   `IN_REVIEW`, or `DONE`, `raft msg read` moves to `MESSAGES_READ` and clears
+   stale task/reply context. The agent must claim the current task before the
+   next file mutation.
 
 4. **Does the extension need to handle `raft` command failures?** Current
    enforcement runs in `tool_call`, before the CLI exits. pi-raft validates the

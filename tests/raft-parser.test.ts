@@ -76,6 +76,25 @@ describe("parseRaftCommands", () => {
     expect(result[0]).toMatchObject({ noun: "msg", verb: "read" });
   });
 
+  it("splits chained commands with newlines", () => {
+    const result = parseRaftCommands("raft msg read --channel general\necho done\nraft task claim 42");
+    expect(result).toHaveLength(2);
+    expect(result[0]).toMatchObject({ noun: "msg", verb: "read" });
+    expect(result[1]).toMatchObject({ noun: "task", verb: "claim" });
+  });
+
+  it("does not split escaped newline continuations", () => {
+    expect(parseRaftCommands("echo \\\nraft msg read --channel general")).toHaveLength(0);
+
+    const continuedCommand = parseRaftCommands("raft msg read \\\r\n--channel general");
+    expect(continuedCommand).toHaveLength(1);
+    expect(continuedCommand[0]).toMatchObject({
+      noun: "msg",
+      verb: "read",
+      args: { channel: "general" },
+    });
+  });
+
   it("handles real-world F1 example", () => {
     const result = parseRaftCommands(
       "raft task claim --number 8 && raft task update --number 8 --status in_review"
@@ -111,6 +130,15 @@ describe("hasChainingOperators", () => {
 
   it("detects || operator", () => {
     expect(hasChainingOperators("raft msg read || echo fail")).toBe(true);
+  });
+
+  it("detects newline separators", () => {
+    expect(hasChainingOperators("raft msg read\nraft task claim")).toBe(true);
+  });
+
+  it("ignores escaped newline continuations", () => {
+    expect(hasChainingOperators("echo \\\nraft msg read")).toBe(false);
+    expect(hasChainingOperators("raft msg read \\\r\n--channel general")).toBe(false);
   });
 
   it("returns false for single command", () => {

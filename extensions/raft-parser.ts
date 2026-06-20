@@ -10,8 +10,8 @@ export interface ParseRaftCommandsOptions {
 }
 
 /**
- * Split a bash command string by shell chaining operators (&&, ;, ||),
- * respecting shell quoting rules (single quotes, double quotes).
+ * Split a bash command string by shell chaining operators (&&, ;, ||,
+ * unescaped newline), respecting shell quoting rules.
  */
 function splitCommandsPreservingQuotes(input: string): string[] {
   const segments: string[] = [];
@@ -34,6 +34,12 @@ function splitCommandsPreservingQuotes(input: string): string[] {
       continue;
     }
 
+    if (!inSingle && ch === "\\" && (next === "\n" || next === "\r")) {
+      if (next === "\r" && input[i + 2] === "\n") i += 2;
+      else i++;
+      continue;
+    }
+
     if (!inSingle && !inDouble) {
       if (ch === "&" && next === "&") {
         segments.push(current.trim());
@@ -50,6 +56,12 @@ function splitCommandsPreservingQuotes(input: string): string[] {
       if (ch === ";") {
         segments.push(current.trim());
         current = "";
+        continue;
+      }
+      if (ch === "\n" || ch === "\r") {
+        segments.push(current.trim());
+        current = "";
+        if (ch === "\r" && next === "\n") i++;
         continue;
       }
     }
@@ -185,17 +197,23 @@ function escapeRegExp(value: string): string {
 }
 
 export function hasChainingOperators(bashCommand: string): boolean {
-  // Strip quoted strings first, then check for && or ; outside quotes
+  // Strip quoted strings first, then check for chaining separators outside quotes.
   let inSingle = false;
   let inDouble = false;
   for (let i = 0; i < bashCommand.length; i++) {
     const ch = bashCommand[i];
     if (ch === "'" && !inDouble) { inSingle = !inSingle; continue; }
     if (ch === '"' && !inSingle) { inDouble = !inDouble; continue; }
+    if (!inSingle && ch === "\\" && (bashCommand[i + 1] === "\n" || bashCommand[i + 1] === "\r")) {
+      if (bashCommand[i + 1] === "\r" && bashCommand[i + 2] === "\n") i += 2;
+      else i++;
+      continue;
+    }
     if (!inSingle && !inDouble) {
       if (ch === "&" && bashCommand[i + 1] === "&") return true;
       if (ch === "|" && bashCommand[i + 1] === "|") return true;
       if (ch === ";") return true;
+      if (ch === "\n" || ch === "\r") return true;
     }
   }
   return false;

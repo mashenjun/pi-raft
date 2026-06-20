@@ -89,6 +89,35 @@ describe("StateMachine transitions", () => {
       expect(sm.currentState).toBe("TASK_CLAIMED");
     });
 
+    it("clears active task when messages are read after a claim", () => {
+      const sm = createStateMachine();
+      sm.transition({ noun: "msg", verb: "read", args: {} });
+      sm.transition({ noun: "task", verb: "claim", args: { number: "42" } });
+
+      const result = sm.transition({ noun: "msg", verb: "read", args: { channel: "general" } });
+
+      expect(result).toMatchObject({ allowed: true, newState: "MESSAGES_READ" });
+      expect(sm.taskId).toBeNull();
+      expect(sm.canWrite().allowed).toBe(false);
+    });
+
+    it("blocks in_review updates for a different active task", () => {
+      const sm = createStateMachine();
+      sm.transition({ noun: "msg", verb: "read", args: {} });
+      sm.transition({ noun: "task", verb: "claim", args: { number: "42" } });
+
+      const result = sm.transition({
+        noun: "task",
+        verb: "update",
+        args: { number: "27", status: "in_review" },
+      });
+
+      expect(result.allowed).toBe(false);
+      if (!result.allowed) expect(result.reason).toContain("active task is #42");
+      expect(sm.currentState).toBe("TASK_CLAIMED");
+      expect(sm.taskId).toBe("42");
+    });
+
     it("blocks raft task update --status done from TASK_CLAIMED", () => {
       const sm = createStateMachine();
       sm.transition({ noun: "msg", verb: "read", args: {} });
@@ -131,6 +160,20 @@ describe("StateMachine transitions", () => {
       expect(sm.taskId).toBe("42");
     });
 
+    it("clears active task when messages are read during review", () => {
+      const sm = createStateMachine();
+      sm.transition({ noun: "msg", verb: "read", args: {} });
+      sm.transition({ noun: "task", verb: "claim", args: { number: "42" } });
+      sm.transition({ noun: "task", verb: "update", args: { number: "42", status: "in_review" } });
+
+      const result = sm.transition({ noun: "msg", verb: "read", args: { channel: "general" } });
+
+      expect(result).toMatchObject({ allowed: true, newState: "MESSAGES_READ" });
+      expect(sm.taskId).toBeNull();
+      expect(sm.replyTarget).toBeNull();
+      expect(sm.canWrite().allowed).toBe(false);
+    });
+
     it("allows raft task update --status done → DONE and clears active task", () => {
       const sm = createStateMachine();
       sm.transition({ noun: "msg", verb: "read", args: {} });
@@ -165,6 +208,24 @@ describe("StateMachine transitions", () => {
       if (!result.allowed) expect(result.reason).toContain("active task is #42");
       expect(sm.currentState).toBe("IN_REVIEW");
       expect(sm.taskId).toBe("42");
+    });
+
+    it("blocks mutating task updates when active task id is unknown", () => {
+      const sm = createStateMachine({
+        currentState: "IN_REVIEW",
+        taskId: null,
+        replyTarget: null,
+      });
+
+      const result = sm.transition({
+        noun: "task",
+        verb: "update",
+        args: { number: "42", status: "done" },
+      });
+
+      expect(result.allowed).toBe(false);
+      if (!result.allowed) expect(result.reason).toContain("active claimed task id");
+      expect(sm.currentState).toBe("IN_REVIEW");
     });
 
     it("allows raft msg post → DONE", () => {
