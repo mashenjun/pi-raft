@@ -276,6 +276,7 @@ describe("pi-raft extension integration", () => {
       "/usr/bin/env -iS 'touch file.txt'",
       "/usr/bin/env -iS-u PATH touch file.txt",
       "/usr/bin/env -iS -u PATH touch file.txt",
+      "env -S 'bash -lc' 'command touch file.txt'",
       "sudo /usr/bin/env -iS 'touch file.txt'",
       'env --split-string=\'bash -lc "touch file.txt"\'',
       "sudo -u root bash -lc 'touch file.txt'",
@@ -291,7 +292,7 @@ describe("pi-raft extension integration", () => {
       '"touch" file.txt',
     ]) {
       const result = await harness.emit("tool_call", bash(command));
-      expect(result).toMatchObject({ block: true });
+      expect(result, command).toMatchObject({ block: true });
       expect(result.reason).toMatch(/shell file (redirection|mutation)/);
       expect(result.reason).toContain("msg read");
     }
@@ -315,6 +316,7 @@ describe("pi-raft extension integration", () => {
       "git rm -- -h",
       "git rm --pathspec-from-file --dry-run",
       "git rm --pathspec-from-f --dry-run",
+      "git rm --pathspec-fro --dry-run",
       "git rm --pathspec-from --dry-run",
       "git rm --pathspec-from- --dry-run",
     ]) {
@@ -402,11 +404,14 @@ describe("pi-raft extension integration", () => {
     expect(await harness.emit("tool_call", bash("npm ci --dry-run"))).toBeUndefined();
     expect(await harness.emit("tool_call", bash("npm install --dry-run=true"))).toBeUndefined();
     expect(await harness.emit("tool_call", bash("npm udpate --dry-run"))).toBeUndefined();
+    expect(await harness.emit("tool_call", bash("npm ci --no-dry-run --dry-run"))).toBeUndefined();
     for (const command of [
       "npm ci --dry-run=false",
       "npm udpate --dry-run false",
       "npm ci --dry-run=0",
       "npm ci --dry-run=no",
+      "npm ci --dry-run --dry-run=false",
+      "npm ci --dry-run --no-dry-run",
     ]) {
       const result = await harness.emit("tool_call", bash(command));
       expect(result).toMatchObject({ block: true });
@@ -1054,6 +1059,32 @@ describe("pi-raft extension integration", () => {
     const promptResult = await harness.emit("before_agent_start", {
       type: "before_agent_start",
       prompt: "Do not complete task #42 yet; continue working on it.",
+      systemPrompt: "base",
+      systemPromptOptions: {},
+    });
+
+    expect(promptResult.systemPrompt).toContain("[Slock] State: IN_REVIEW");
+    expect(promptResult.systemPrompt).toContain("Task: #42");
+    expect(await harness.emit("tool_call", write("console.log('same task');"))).toBeUndefined();
+  });
+
+  it("preserves stale state for bare same-task negated completion continuations", async () => {
+    const harness = createHarness([
+      {
+        type: "custom",
+        customType: "pi-raft-state",
+        data: {
+          currentState: "IN_REVIEW",
+          taskId: "42",
+          replyTarget: null,
+        },
+      },
+    ]);
+
+    await harness.emit("session_start", { type: "session_start", reason: "reload" });
+    const promptResult = await harness.emit("before_agent_start", {
+      type: "before_agent_start",
+      prompt: "Do not complete task #42 yet; keep working.",
       systemPrompt: "base",
       systemPromptOptions: {},
     });

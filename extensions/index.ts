@@ -398,6 +398,7 @@ function mentionsRejectedTaskId(text: string, taskId: string): boolean {
 
 function hasSameTaskContinuationIntent(text: string, oldTaskPattern: string): boolean {
   return /\bsame task\b/.test(text) ||
+    new RegExp(String.raw`${oldTaskPattern}.{0,60}\b(?:continue|resume|keep working|carry on)\b(?!(?:\s+(?:with|on)\s+(?!it\b|this task\b|the task\b|current task\b|same task\b)))`).test(text) ||
     new RegExp(String.raw`\b(?:continue|resume|keep working|carry on)\b.{0,40}${oldTaskPattern}`).test(text) ||
     /\b(?:continue|resume|keep working|carry on)\b.{0,40}\b(?:it|this task|the task|current task)\b/.test(text);
 }
@@ -791,6 +792,33 @@ function executableWordIndex(words: string[]): number {
       i = skipEnvPrefix(words, i + 1);
       continue;
     }
+    if (commandBaseName(word) === "command") {
+      const next = skipCommandPrefix(words, i + 1);
+      if (next === -1) {
+        return -1;
+      }
+      i = next;
+      continue;
+    }
+    return i;
+  }
+  return -1;
+}
+
+function skipCommandPrefix(words: string[], start: number): number {
+  let i = start;
+  while (i < words.length) {
+    const word = words[i];
+    if (word === "--") {
+      return i + 1;
+    }
+    if (word === "-v" || word === "-V") {
+      return -1;
+    }
+    if (word === "-p") {
+      i++;
+      continue;
+    }
     return i;
   }
   return -1;
@@ -998,7 +1026,14 @@ function collectEnvSplitStringPayloads(words: string[], start: number, payloads:
 }
 
 function envSplitCommand(payload: string, remainingWords: string[]): string {
-  return [payload, ...remainingWords].join(" ");
+  return ["env", payload, ...remainingWords.map(shellQuoteWord)].join(" ");
+}
+
+function shellQuoteWord(word: string): string {
+  if (/^[A-Za-z0-9_./:=@%+,-]+$/.test(word)) {
+    return word;
+  }
+  return `'${word.replace(/'/g, "'\\''")}'`;
 }
 
 function isShellExecutable(word: string): boolean {
@@ -1195,7 +1230,7 @@ function gitOptionArgsBeforePathspec(args: string[]): string[] {
 function gitPathspecOptionNeedsValue(option: string): boolean {
   const canonical = "--pathspec-from-file";
   return option === canonical ||
-    (option.length >= "--pathspec-from".length && canonical.startsWith(option));
+    (option.length >= "--pathspec-fr".length && canonical.startsWith(option));
 }
 
 function gitSubcommandIndex(words: string[]): number {
@@ -1253,20 +1288,31 @@ function isMutatingPackageManagerSegment(segment: string): boolean {
 }
 
 function hasPackageDryRunOption(args: string[]): boolean {
+  let dryRun = false;
   for (let i = 0; i < args.length; i++) {
     const word = args[i];
+    if (word === "--no-dry-run") {
+      dryRun = false;
+      continue;
+    }
     if (word === "--dry-run") {
       if (i + 1 < args.length && isFalseOptionValue(args[i + 1])) {
         i++;
+        dryRun = false;
         continue;
       }
-      return true;
+      dryRun = true;
+      continue;
     }
     if (isPackageDryRunOption(word)) {
-      return true;
+      dryRun = true;
+      continue;
+    }
+    if (isPackageNoDryRunOption(word)) {
+      dryRun = false;
     }
   }
-  return false;
+  return dryRun;
 }
 
 function isPackageDryRunOption(word: string): boolean {
@@ -1275,6 +1321,14 @@ function isPackageDryRunOption(word: string): boolean {
   }
   const value = word.slice("--dry-run=".length).toLowerCase();
   return value === "" || value === "true" || value === "1" || value === "yes" || value === "on";
+}
+
+function isPackageNoDryRunOption(word: string): boolean {
+  if (!word.startsWith("--dry-run=")) {
+    return false;
+  }
+  const value = word.slice("--dry-run=".length).toLowerCase();
+  return isFalseOptionValue(value);
 }
 
 function isFalseOptionValue(word: string): boolean {
