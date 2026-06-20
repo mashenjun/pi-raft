@@ -376,6 +376,7 @@ describe("pi-raft extension integration", () => {
       "sudoedit README.md",
       "command sudoedit README.md",
       "command sudo -e README.md",
+      "command sudo sudoedit README.md",
     ]) {
       const result = await harness.emit("tool_call", bash(command));
       expect(result).toMatchObject({ block: true });
@@ -417,6 +418,7 @@ describe("pi-raft extension integration", () => {
     expect(await harness.emit("tool_call", bash("npm install --dry-run -- --no-dry-run"))).toBeUndefined();
     expect(await harness.emit("tool_call", bash("npm install --dry-run -- --dry-run=false"))).toBeUndefined();
     expect(await harness.emit("tool_call", bash("npm ci --no-dry-run=false"))).toBeUndefined();
+    expect(await harness.emit("tool_call", bash("bun install --dry-run"))).toBeUndefined();
     for (const command of [
       "npm ci --dry-run=false",
       "npm udpate --dry-run false",
@@ -426,6 +428,7 @@ describe("pi-raft extension integration", () => {
       "npm ci --dry-run --no-dry-run",
       "npm install --dry-run --no-dry-run",
       "npm ci --no-dry-run=true",
+      "bun install --no-dry-run=false",
     ]) {
       const result = await harness.emit("tool_call", bash(command));
       expect(result).toMatchObject({ block: true });
@@ -1099,6 +1102,32 @@ describe("pi-raft extension integration", () => {
     const promptResult = await harness.emit("before_agent_start", {
       type: "before_agent_start",
       prompt: "Do not complete task #42 yet; keep working.",
+      systemPrompt: "base",
+      systemPromptOptions: {},
+    });
+
+    expect(promptResult.systemPrompt).toContain("[Slock] State: IN_REVIEW");
+    expect(promptResult.systemPrompt).toContain("Task: #42");
+    expect(await harness.emit("tool_call", write("console.log('same task');"))).toBeUndefined();
+  });
+
+  it("preserves stale state for adverbial same-task negated completion continuations", async () => {
+    const harness = createHarness([
+      {
+        type: "custom",
+        customType: "pi-raft-state",
+        data: {
+          currentState: "IN_REVIEW",
+          taskId: "42",
+          replyTarget: null,
+        },
+      },
+    ]);
+
+    await harness.emit("session_start", { type: "session_start", reason: "reload" });
+    const promptResult = await harness.emit("before_agent_start", {
+      type: "before_agent_start",
+      prompt: "Do not complete task #42 yet; keep working for now.",
       systemPrompt: "base",
       systemPromptOptions: {},
     });

@@ -397,8 +397,9 @@ function mentionsRejectedTaskId(text: string, taskId: string): boolean {
 }
 
 function hasSameTaskContinuationIntent(text: string, oldTaskPattern: string): boolean {
+  const sameTaskTail = String.raw`(?:\s+(?:(?:on\s+)?(?:it|this task|the task|current task|same task)|for\s+now|as\s+before|when\s+ready))?`;
   return /\bsame task\b/.test(text) ||
-    new RegExp(String.raw`${oldTaskPattern}.{0,60}\b(?:continue(?:\s+working)?|resume|keep working|carry on)\b(?:\s+(?:on\s+)?(?:it|this task|the task|current task|same task))?(?:[.!?,;:]|$)`).test(text) ||
+    new RegExp(String.raw`${oldTaskPattern}.{0,60}\b(?:continue(?:\s+working)?|resume|keep working|carry on)\b${sameTaskTail}(?:[.!?,;:]|$)`).test(text) ||
     new RegExp(String.raw`\b(?:continue|resume|keep working|carry on)\b.{0,40}${oldTaskPattern}`).test(text) ||
     /\b(?:continue|resume|keep working|carry on)\b.{0,40}\b(?:it|this task|the task|current task)\b/.test(text);
 }
@@ -1140,7 +1141,7 @@ function isSudoEditSegment(segment: string): boolean {
       return false;
     }
     if (!word.startsWith("-") || word === "-") {
-      return false;
+      return commandBaseName(word) === "sudoedit" && !words.slice(i + 1).some(isHelpOption);
     }
     if (word === "--edit" || word.startsWith("--edit=")) {
       return true;
@@ -1293,7 +1294,7 @@ function isMutatingPackageManagerSegment(segment: string): boolean {
   if (!/^(?:npm|pnpm|bun|yarn)$/.test(executable) || words.length < 2) {
     return false;
   }
-  if (hasPackageDryRunOption(words.slice(1))) {
+  if (hasPackageDryRunOption(executable, words.slice(1))) {
     return false;
   }
   if (executable === "npm") {
@@ -1303,7 +1304,7 @@ function isMutatingPackageManagerSegment(segment: string): boolean {
   return /^(?:install|i|ci|add|remove|rm|uninstall|update|up)$/.test(words[1]);
 }
 
-function hasPackageDryRunOption(args: string[]): boolean {
+function hasPackageDryRunOption(executable: string, args: string[]): boolean {
   let dryRun = false;
   for (let i = 0; i < args.length; i++) {
     const word = args[i];
@@ -1315,7 +1316,7 @@ function hasPackageDryRunOption(args: string[]): boolean {
       continue;
     }
     if (word.startsWith("--no-dry-run=")) {
-      dryRun = noDryRunOptionValueMeansDryRun(word);
+      dryRun = executable !== "bun" && noDryRunOptionValueMeansDryRun(word);
       continue;
     }
     if (word === "--dry-run") {
