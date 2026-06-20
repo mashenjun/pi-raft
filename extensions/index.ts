@@ -675,6 +675,8 @@ function splitShellStages(command: string): string[] {
   let current = "";
   let inSingle = false;
   let inDouble = false;
+  let parenDepth = 0;
+  let braceDepth = 0;
 
   for (let i = 0; i < command.length; i++) {
     const ch = command[i];
@@ -692,30 +694,51 @@ function splitShellStages(command: string): string[] {
     }
 
     if (!inSingle && !inDouble) {
-      if (ch === "|" && next === "&") {
+      if (ch === "(") {
+        parenDepth++;
+        current += ch;
+        continue;
+      }
+      if (ch === ")" && parenDepth > 0) {
+        parenDepth--;
+        current += ch;
+        continue;
+      }
+      if (ch === "{") {
+        braceDepth++;
+        current += ch;
+        continue;
+      }
+      if (ch === "}" && braceDepth > 0) {
+        braceDepth--;
+        current += ch;
+        continue;
+      }
+      const inCompound = parenDepth > 0 || braceDepth > 0;
+      if (!inCompound && ch === "|" && next === "&") {
         pushShellStage(segments, current);
         current = "";
         i++;
         continue;
       }
-      if (ch === "&" && next === "&") {
+      if (!inCompound && ch === "&" && next === "&") {
         pushShellStage(segments, current);
         current = "";
         i++;
         continue;
       }
-      if (ch === "|" && next === "|") {
+      if (!inCompound && ch === "|" && next === "|") {
         pushShellStage(segments, current);
         current = "";
         i++;
         continue;
       }
-      if (ch === "|" || ch === ";") {
+      if (!inCompound && (ch === "|" || ch === ";")) {
         pushShellStage(segments, current);
         current = "";
         continue;
       }
-      if (ch === "\n" || ch === "\r" || (ch === "&" && command[i - 1] !== ">")) {
+      if (!inCompound && (ch === "\n" || ch === "\r" || (ch === "&" && command[i - 1] !== ">"))) {
         pushShellStage(segments, current);
         current = "";
         continue;
@@ -781,6 +804,10 @@ function executableWordIndex(words: string[]): number {
   let i = 0;
   while (i < words.length) {
     const word = words[i];
+    if (isEnvAssignment(word)) {
+      i++;
+      continue;
+    }
     if (commandBaseName(word) === "sudo") {
       const next = skipSudoPrefix(words, i + 1);
       if (next === -1) {
@@ -799,6 +826,38 @@ function executableWordIndex(words: string[]): number {
         return -1;
       }
       i = next;
+      continue;
+    }
+    if (commandBaseName(word) === "exec") {
+      const next = skipExecPrefix(words, i + 1);
+      if (next === -1) {
+        return -1;
+      }
+      i = next;
+      continue;
+    }
+    return i;
+  }
+  return -1;
+}
+
+function skipExecPrefix(words: string[], start: number): number {
+  let i = start;
+  while (i < words.length) {
+    const word = words[i];
+    if (word === "--") {
+      return i + 1 < words.length ? i + 1 : -1;
+    }
+    if (word === "-a") {
+      i += 2;
+      continue;
+    }
+    if (word.startsWith("-a") && word.length > 2) {
+      i++;
+      continue;
+    }
+    if (/^-[cl]+$/.test(word)) {
+      i++;
       continue;
     }
     return i;
@@ -967,6 +1026,10 @@ function envSplitStringCommands(command: string): string[] {
 function envWordIndex(words: string[]): number {
   let i = 0;
   while (i < words.length) {
+    if (isEnvAssignment(words[i])) {
+      i++;
+      continue;
+    }
     if (commandBaseName(words[i]) === "command") {
       const next = skipCommandPrefix(words, i + 1);
       if (next === -1) return -1;
@@ -1051,6 +1114,10 @@ function commandBaseName(word: string): string {
   return word.replace(/^.*\//, "");
 }
 
+function isEnvAssignment(word: string): boolean {
+  return /^[A-Za-z_][A-Za-z0-9_]*=/.test(word);
+}
+
 function shellWords(input: string): string[] {
   const words: string[] = [];
   let current = "";
@@ -1081,6 +1148,11 @@ function shellWords(input: string): string[] {
       }
       continue;
     }
+    if (ch === "\\" && i + 1 < input.length) {
+      i++;
+      current += input[i];
+      continue;
+    }
     current += ch;
   }
 
@@ -1090,28 +1162,53 @@ function shellWords(input: string): string[] {
   return words;
 }
 
+function wordsToShellCommand(words: string[]): string {
+  return words.map(shellQuoteWord).join(" ");
+}
+
 function isMutatingShellSegment(segment: string, depth = 0): boolean {
+  const compoundBody = shellCompoundBody(segment);
+  if (compoundBody && depth < 3 && detectShellMutation(compoundBody, depth + 1)) {
+    return true;
+  }
+
   const words = shellWords(segment);
   const commandIndex = executableWordIndex(words);
   const normalized = commandIndex === -1
     ? ""
-    : [commandBaseName(words[commandIndex]), ...words.slice(commandIndex + 1)].join(" ");
+    : wordsToShellCommand([commandBaseName(words[commandIndex]), ...words.slice(commandIndex + 1)]);
   return isSudoEditSegment(segment) ||
-    /^(?:touch|mkdir|mv|cp|rm|chmod|chown|install|tee)\b/.test(normalized) ||
+    /^(?:touch|mkdir|mv|cp|rm|chmod|chown|install|tee|ln)\b/.test(normalized) ||
     isSedInPlaceSegment(normalized) ||
     /^perl\s+-[A-Za-z]*i[A-Za-z]*\b/.test(normalized) ||
-    isMutatingGitSegment(normalized) ||
+    isMutatingGitSegment(normalized, depth) ||
     isMutatingPackageManagerSegment(normalized) ||
     isTarExtractionSegment(normalized) ||
     isPatchSegment(normalized) ||
     isMutatingFindSegment(normalized, depth) ||
+    isMutatingXargsSegment(normalized, depth) ||
     /^unzip\b/.test(normalized);
+}
+
+function shellCompoundBody(segment: string): string | null {
+  const trimmed = segment.trim();
+  if (trimmed.startsWith("(") && trimmed.endsWith(")")) {
+    return trimmed.slice(1, -1);
+  }
+  if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+    return trimmed.slice(1, -1);
+  }
+  return null;
 }
 
 function isSudoEditSegment(segment: string): boolean {
   const words = shellWords(segment);
   let i = 0;
   while (i < words.length) {
+    if (isEnvAssignment(words[i])) {
+      i++;
+      continue;
+    }
     if (commandBaseName(words[i]) === "command") {
       const next = skipCommandPrefix(words, i + 1);
       if (next === -1) return false;
@@ -1138,7 +1235,9 @@ function isSudoEditSegment(segment: string): boolean {
   while (i < words.length) {
     const word = words[i];
     if (word === "--") {
-      return false;
+      i++;
+      return i < words.length && commandBaseName(words[i]) === "sudoedit" &&
+        !words.slice(i + 1).some(isHelpOption);
     }
     if (!word.startsWith("-") || word === "-") {
       return commandBaseName(word) === "sudoedit" && !words.slice(i + 1).some(isHelpOption);
@@ -1194,7 +1293,7 @@ function isSedInPlaceSegment(segment: string): boolean {
   return false;
 }
 
-function isMutatingGitSegment(segment: string): boolean {
+function isMutatingGitSegment(segment: string, depth: number): boolean {
   const words = shellWords(segment);
   if (words[0] !== "git" || words.length < 2) {
     return false;
@@ -1206,16 +1305,23 @@ function isMutatingGitSegment(segment: string): boolean {
   }
 
   const subcommand = words[subcommandIndex];
+  if (depth < 3) {
+    const shellAliasCommand = gitShellAliasCommand(words, subcommandIndex);
+    if (shellAliasCommand && detectShellMutation(shellAliasCommand, depth + 1)) {
+      return true;
+    }
+  }
   if (subcommand === "apply" || subcommand === "checkout-index" || subcommand === "restore") {
     return true;
   }
   if (subcommand === "rm" || subcommand === "mv") {
     const args = words.slice(subcommandIndex + 1);
     const optionArgs = gitOptionArgsBeforePathspec(args);
-    return !optionArgs.some(isGitDryRunOption) && !optionArgs.some(isHelpOption);
+    return !hasEffectiveGitDryRun(optionArgs) && !optionArgs.some(isHelpOption);
   }
   if (subcommand === "clean") {
-    return !words.slice(subcommandIndex + 1).some(isGitDryRunOption);
+    const optionArgs = gitCleanOptionArgsBeforePathspec(words.slice(subcommandIndex + 1));
+    return !hasEffectiveGitDryRun(optionArgs);
   }
   if (subcommand === "reset") {
     return words.slice(subcommandIndex + 1).includes("--hard");
@@ -1226,7 +1332,35 @@ function isMutatingGitSegment(segment: string): boolean {
   if (subcommand === "switch") {
     return words.length > subcommandIndex + 1 && !words.slice(subcommandIndex + 1).some(isHelpOption);
   }
+  if (subcommand === "clone" || subcommand === "pull") {
+    return !words.slice(subcommandIndex + 1).some(isHelpOption);
+  }
   return false;
+}
+
+function gitShellAliasCommand(words: string[], subcommandIndex: number): string | null {
+  const subcommand = words[subcommandIndex];
+  for (let i = 1; i < subcommandIndex; i++) {
+    const word = words[i];
+    let value: string | null = null;
+    if (word === "-c" && i + 1 < subcommandIndex) {
+      value = words[++i];
+    } else if (word.startsWith("-c") && word.length > 2) {
+      value = word.slice(2);
+    } else if (word === "--config" && i + 1 < subcommandIndex) {
+      value = words[++i];
+    } else if (word.startsWith("--config=")) {
+      value = word.slice("--config=".length);
+    }
+    if (!value) {
+      continue;
+    }
+    const match = /^alias\.([^.=]+)=!(.+)$/.exec(value);
+    if (match && match[1] === subcommand) {
+      return match[2];
+    }
+  }
+  return null;
 }
 
 function gitOptionArgsBeforePathspec(args: string[]): string[] {
@@ -1238,6 +1372,24 @@ function gitOptionArgsBeforePathspec(args: string[]): string[] {
     }
     result.push(arg);
     if (gitPathspecOptionNeedsValue(arg) && !arg.includes("=") && i + 1 < args.length) {
+      i++;
+    }
+  }
+  return result;
+}
+
+function gitCleanOptionArgsBeforePathspec(args: string[]): string[] {
+  const result: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === "--") {
+      break;
+    }
+    if (!arg.startsWith("-") || arg === "-") {
+      break;
+    }
+    result.push(arg);
+    if ((arg === "-e" || arg === "--exclude") && i + 1 < args.length) {
       i++;
     }
   }
@@ -1284,6 +1436,24 @@ function isGitDryRunOption(word: string): boolean {
     (/^-[A-Za-z]+$/.test(word) && word.includes("n"));
 }
 
+function isGitNoDryRunOption(word: string): boolean {
+  return word === "--no-dry-run" || word.startsWith("--no-dry-run=");
+}
+
+function hasEffectiveGitDryRun(args: string[]): boolean {
+  let dryRun = false;
+  for (const arg of args) {
+    if (isGitNoDryRunOption(arg)) {
+      dryRun = false;
+      continue;
+    }
+    if (isGitDryRunOption(arg)) {
+      dryRun = true;
+    }
+  }
+  return dryRun;
+}
+
 function isHelpOption(word: string): boolean {
   return word === "--help" || word === "-h";
 }
@@ -1294,14 +1464,55 @@ function isMutatingPackageManagerSegment(segment: string): boolean {
   if (!/^(?:npm|pnpm|bun|yarn)$/.test(executable) || words.length < 2) {
     return false;
   }
+  const commandIndex = packageCommandIndex(executable, words);
+  if (commandIndex === -1) {
+    return false;
+  }
   if (hasPackageDryRunOption(executable, words.slice(1))) {
     return false;
   }
+  const command = words[commandIndex];
   if (executable === "npm") {
     return /^(?:install|i|in|ins|inst|insta|instal|isnt|isnta|isntal|isntall|ci|add|remove|rm|r|uninstall|unlink|un|update|up|upgrade|udpate|link|ln)$/
-      .test(words[1]);
+      .test(command);
   }
-  return /^(?:install|i|ci|add|remove|rm|uninstall|update|up)$/.test(words[1]);
+  return /^(?:install|i|ci|add|remove|rm|r|uninstall|un|update|up|link|ln|unlink)$/.test(command);
+}
+
+function packageCommandIndex(executable: string, words: string[]): number {
+  let i = 1;
+  while (i < words.length) {
+    const word = words[i];
+    if (word === "--") {
+      return i + 1 < words.length ? i + 1 : -1;
+    }
+    if (!word.startsWith("-") || word === "-") {
+      return i;
+    }
+    const option = word.split("=", 1)[0];
+    const hasInlineValue = word.includes("=");
+    i++;
+    if (packageGlobalOptionNeedsValue(executable, option) && !hasInlineValue && i < words.length) {
+      i++;
+    }
+  }
+  return -1;
+}
+
+function packageGlobalOptionNeedsValue(executable: string, option: string): boolean {
+  if (executable === "pnpm") {
+    return /^(?:-C|--dir|--store-dir|--virtual-store-dir|--config\.dir)$/.test(option);
+  }
+  if (executable === "npm") {
+    return /^(?:-C|--prefix|--cache|--userconfig|--globalconfig)$/.test(option);
+  }
+  if (executable === "bun") {
+    return /^(?:-C|--cwd)$/.test(option);
+  }
+  if (executable === "yarn") {
+    return /^(?:--cwd|--modules-folder)$/.test(option);
+  }
+  return false;
 }
 
 function hasPackageDryRunOption(executable: string, args: string[]): boolean {
@@ -1390,12 +1601,49 @@ function isMutatingFindSegment(segment: string, depth: number): boolean {
         payload.push(words[i]);
         i++;
       }
-      if (payload.length > 0 && depth < 3 && detectShellMutation(payload.join(" "), depth + 1)) {
+      if (payload.length > 0 && depth < 3 && detectShellMutation(wordsToShellCommand(payload), depth + 1)) {
         return true;
       }
     }
   }
   return false;
+}
+
+function isMutatingXargsSegment(segment: string, depth: number): boolean {
+  const words = shellWords(segment);
+  if (commandBaseName(words[0] ?? "") !== "xargs" || depth >= 3) {
+    return false;
+  }
+  const commandIndex = xargsCommandIndex(words);
+  if (commandIndex === -1) {
+    return false;
+  }
+  return detectShellMutation(wordsToShellCommand(words.slice(commandIndex)), depth + 1) !== null;
+}
+
+function xargsCommandIndex(words: string[]): number {
+  let i = 1;
+  while (i < words.length) {
+    const word = words[i];
+    if (word === "--") {
+      return i + 1 < words.length ? i + 1 : -1;
+    }
+    if (!word.startsWith("-") || word === "-") {
+      return i;
+    }
+    const option = word.split("=", 1)[0];
+    const hasInlineValue = word.includes("=");
+    i++;
+    if (xargsOptionNeedsValue(option) && !hasInlineValue && i < words.length) {
+      i++;
+    }
+  }
+  return -1;
+}
+
+function xargsOptionNeedsValue(option: string): boolean {
+  return /^(?:-[AEIilLnPsx]|--(?:arg-file|eof|replace|max-lines|max-args|max-procs|max-chars|process-slot-var|delimiter))$/
+    .test(option);
 }
 
 function isFindExecTerminator(word: string): boolean {

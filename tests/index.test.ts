@@ -255,7 +255,7 @@ describe("pi-raft extension integration", () => {
       "echo ok\n touch file.txt",
     ]) {
       const result = await harness.emit("tool_call", bash(command));
-      expect(result).toMatchObject({ block: true });
+      expect(result, command).toMatchObject({ block: true });
       expect(result.reason).toContain("shell file mutation");
       expect(result.reason).toContain("msg read");
     }
@@ -280,6 +280,12 @@ describe("pi-raft extension integration", () => {
       "command env -S 'touch file.txt'",
       "sudo /usr/bin/env -iS 'touch file.txt'",
       'env --split-string=\'bash -lc "touch file.txt"\'',
+      "FOO=bar touch file.txt",
+      "exec touch file.txt",
+      String.raw`t\ouch file.txt`,
+      "(touch file.txt)",
+      "{ touch file.txt; }",
+      "printf 'file.txt\\n' | xargs touch",
       "sudo -u root bash -lc 'touch file.txt'",
       "sudo -D /tmp bash -lc 'touch file.txt'",
       "sudo --chdir /tmp bash -lc 'touch file.txt'",
@@ -312,17 +318,23 @@ describe("pi-raft extension integration", () => {
       "git checkout main",
       "git -C repo checkout main",
       "git switch feature",
+      "git clone src copy",
+      "git pull",
       "git rm tracked.ts",
+      "git rm -n --no-dry-run tracked.ts",
       "git mv old.ts new.ts",
+      "git mv -n --no-dry-run old.ts new.ts",
       "git rm -- -h",
       "git rm --pathspec-from-file --dry-run",
       "git rm --pathspec-from-f --dry-run",
       "git rm --pathspec-fro --dry-run",
       "git rm --pathspec-from --dry-run",
       "git rm --pathspec-from- --dry-run",
+      "git clean -f -e -n victim",
+      "git -c alias.pwn='!touch file.txt' pwn",
     ]) {
       const result = await harness.emit("tool_call", bash(command));
-      expect(result).toMatchObject({ block: true });
+      expect(result, command).toMatchObject({ block: true });
       expect(result.reason).toContain("shell file mutation");
       expect(result.reason).toContain("msg read");
     }
@@ -377,9 +389,10 @@ describe("pi-raft extension integration", () => {
       "command sudoedit README.md",
       "command sudo -e README.md",
       "command sudo sudoedit README.md",
+      "sudo -- sudoedit README.md",
     ]) {
       const result = await harness.emit("tool_call", bash(command));
-      expect(result).toMatchObject({ block: true });
+      expect(result, command).toMatchObject({ block: true });
       expect(result.reason).toContain("shell file mutation");
       expect(result.reason).toContain("msg read");
     }
@@ -402,11 +415,17 @@ describe("pi-raft extension integration", () => {
       "npm link",
       "npm ln ../pkg",
       "pnpm i",
+      "pnpm -C repo install --lockfile-only",
+      "pnpm un lodash",
+      "pnpm ln ../pkg",
       "yarn install",
       "bun install",
+      "bun r lodash",
+      "bun link",
+      "bun unlink",
     ]) {
       const result = await harness.emit("tool_call", bash(command));
-      expect(result).toMatchObject({ block: true });
+      expect(result, command).toMatchObject({ block: true });
       expect(result.reason).toContain("shell file mutation");
       expect(result.reason).toContain("msg read");
     }
@@ -450,6 +469,8 @@ describe("pi-raft extension integration", () => {
       "find . -name x -exec /bin/rm {} ';'",
       "find . -name x -exec /usr/bin/env -S 'touch file.txt' ';'",
       "find . -name x -execdir sh -c 'touch file.txt' ';'",
+      "find . -name x -exec sh -c 'command touch file.txt' ';'",
+      "ln -s target link",
     ]) {
       const result = await harness.emit("tool_call", bash(command));
       expect(result).toMatchObject({ block: true });
