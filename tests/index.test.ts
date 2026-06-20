@@ -274,6 +274,8 @@ describe("pi-raft extension integration", () => {
       "env -S '-i touch file.txt'",
       "/usr/bin/env -S 'touch file.txt'",
       "/usr/bin/env -iS 'touch file.txt'",
+      "/usr/bin/env -iS-u PATH touch file.txt",
+      "/usr/bin/env -iS -u PATH touch file.txt",
       "sudo /usr/bin/env -iS 'touch file.txt'",
       'env --split-string=\'bash -lc "touch file.txt"\'',
       "sudo -u root bash -lc 'touch file.txt'",
@@ -313,6 +315,8 @@ describe("pi-raft extension integration", () => {
       "git rm -- -h",
       "git rm --pathspec-from-file --dry-run",
       "git rm --pathspec-from-f --dry-run",
+      "git rm --pathspec-from --dry-run",
+      "git rm --pathspec-from- --dry-run",
     ]) {
       const result = await harness.emit("tool_call", bash(command));
       expect(result).toMatchObject({ block: true });
@@ -400,6 +404,7 @@ describe("pi-raft extension integration", () => {
     expect(await harness.emit("tool_call", bash("npm udpate --dry-run"))).toBeUndefined();
     for (const command of [
       "npm ci --dry-run=false",
+      "npm udpate --dry-run false",
       "npm ci --dry-run=0",
       "npm ci --dry-run=no",
     ]) {
@@ -1059,35 +1064,41 @@ describe("pi-raft extension integration", () => {
   });
 
   it("resets stale state when negated completion starts unrelated work", async () => {
-    const harness = createHarness([
-      {
-        type: "custom",
-        customType: "pi-raft-state",
-        data: {
-          currentState: "IN_REVIEW",
-          taskId: "42",
-          replyTarget: null,
+    for (const prompt of [
+      "Do not finish task #42; start the README cleanup.",
+      "Do not finish task #42; continue with the README cleanup instead.",
+      "Task #42: no longer finish it; start the README cleanup.",
+    ]) {
+      const harness = createHarness([
+        {
+          type: "custom",
+          customType: "pi-raft-state",
+          data: {
+            currentState: "IN_REVIEW",
+            taskId: "42",
+            replyTarget: null,
+          },
         },
-      },
-    ]);
+      ]);
 
-    await harness.emit("session_start", { type: "session_start", reason: "reload" });
-    const promptResult = await harness.emit("before_agent_start", {
-      type: "before_agent_start",
-      prompt: "Do not finish task #42; start the README cleanup.",
-      systemPrompt: "base",
-      systemPromptOptions: {},
-    });
+      await harness.emit("session_start", { type: "session_start", reason: "reload" });
+      const promptResult = await harness.emit("before_agent_start", {
+        type: "before_agent_start",
+        prompt,
+        systemPrompt: "base",
+        systemPromptOptions: {},
+      });
 
-    expect(promptResult.systemPrompt).toContain("[Slock] State: IDLE");
-    expect(latestState(harness)).toMatchObject({
-      currentState: "IDLE",
-      taskId: null,
-      replyTarget: null,
-    });
-    const result = await harness.emit("tool_call", write("console.log('fresh');"));
-    expect(result).toMatchObject({ block: true });
-    expect(result.reason).toContain("msg read");
+      expect(promptResult.systemPrompt).toContain("[Slock] State: IDLE");
+      expect(latestState(harness)).toMatchObject({
+        currentState: "IDLE",
+        taskId: null,
+        replyTarget: null,
+      });
+      const result = await harness.emit("tool_call", write("console.log('fresh');"));
+      expect(result).toMatchObject({ block: true });
+      expect(result.reason).toContain("msg read");
+    }
   });
 
   it("blocks stale prior-task completion after claiming the next task", async () => {

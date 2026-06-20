@@ -382,9 +382,10 @@ function mentionsRejectedTaskId(text: string, taskId: string): boolean {
   const negatedActiveTaskAction =
     String.raw`(?:do not|don't|dont|never|no longer)\s+` +
     String.raw`(?:work\s+on|use|handle|continue|resume|keep\s+working\s+on|carry\s+on\s+with|claim)\b`;
-  const rejectsCompletion = new RegExp(String.raw`\b${negatedCompletionAction}.{0,40}${oldTaskPattern}`)
-    .test(text);
-  if (rejectsCompletion && !hasExplicitContinuationIntent(text)) {
+  const rejectsCompletion =
+    new RegExp(String.raw`\b${negatedCompletionAction}.{0,40}${oldTaskPattern}`).test(text) ||
+    new RegExp(String.raw`${oldTaskPattern}.{0,40}\b${negatedCompletionAction}`).test(text);
+  if (rejectsCompletion && !hasSameTaskContinuationIntent(text, oldTaskPattern)) {
     return true;
   }
   return new RegExp(String.raw`\b(?:ignore|stop|drop|abandon|discard|cancel)\b.{0,30}${oldTaskPattern}`)
@@ -395,8 +396,10 @@ function mentionsRejectedTaskId(text: string, taskId: string): boolean {
       .test(text);
 }
 
-function hasExplicitContinuationIntent(text: string): boolean {
-  return /\b(continue|resume|keep working|carry on|same task)\b/.test(text);
+function hasSameTaskContinuationIntent(text: string, oldTaskPattern: string): boolean {
+  return /\bsame task\b/.test(text) ||
+    new RegExp(String.raw`\b(?:continue|resume|keep working|carry on)\b.{0,40}${oldTaskPattern}`).test(text) ||
+    /\b(?:continue|resume|keep working|carry on)\b.{0,40}\b(?:it|this task|the task|current task)\b/.test(text);
 }
 
 function isApprovalCompletionPrompt(text: string): boolean {
@@ -963,12 +966,12 @@ function collectEnvSplitStringPayloads(words: string[], start: number, payloads:
 
     if (word === "-S" || word === "--split-string") {
       if (i + 1 < words.length) {
-        payloads.push(words[i + 1]);
+        payloads.push(envSplitCommand(words[i + 1], words.slice(i + 2)));
       }
       return;
     }
     if (word.startsWith("--split-string=")) {
-      payloads.push(word.slice("--split-string=".length));
+      payloads.push(envSplitCommand(word.slice("--split-string=".length), words.slice(i + 1)));
       return;
     }
     if (/^-[^-]\S*$/.test(word)) {
@@ -978,9 +981,9 @@ function collectEnvSplitStringPayloads(words: string[], start: number, payloads:
         if (char === "S") {
           const attachedPayload = chars.slice(pos + 1);
           if (attachedPayload !== "") {
-            payloads.push(attachedPayload);
+            payloads.push(envSplitCommand(attachedPayload, words.slice(i + 1)));
           } else if (i + 1 < words.length) {
-            payloads.push(words[i + 1]);
+            payloads.push(envSplitCommand(words[i + 1], words.slice(i + 2)));
           }
           return;
         }
@@ -992,6 +995,10 @@ function collectEnvSplitStringPayloads(words: string[], start: number, payloads:
 
     i = skipEnvOption(words, i);
   }
+}
+
+function envSplitCommand(payload: string, remainingWords: string[]): string {
+  return [payload, ...remainingWords].join(" ");
 }
 
 function isShellExecutable(word: string): boolean {
@@ -1188,7 +1195,7 @@ function gitOptionArgsBeforePathspec(args: string[]): string[] {
 function gitPathspecOptionNeedsValue(option: string): boolean {
   const canonical = "--pathspec-from-file";
   return option === canonical ||
-    (option.length > "--pathspec-from-".length && canonical.startsWith(option));
+    (option.length >= "--pathspec-from".length && canonical.startsWith(option));
 }
 
 function gitSubcommandIndex(words: string[]): number {
@@ -1235,7 +1242,7 @@ function isMutatingPackageManagerSegment(segment: string): boolean {
   if (!/^(?:npm|pnpm|bun|yarn)$/.test(executable) || words.length < 2) {
     return false;
   }
-  if (words.slice(1).some(isPackageDryRunOption)) {
+  if (hasPackageDryRunOption(words.slice(1))) {
     return false;
   }
   if (executable === "npm") {
@@ -1245,15 +1252,34 @@ function isMutatingPackageManagerSegment(segment: string): boolean {
   return /^(?:install|i|ci|add|remove|rm|uninstall|update|up)$/.test(words[1]);
 }
 
-function isPackageDryRunOption(word: string): boolean {
-  if (word === "--dry-run") {
-    return true;
+function hasPackageDryRunOption(args: string[]): boolean {
+  for (let i = 0; i < args.length; i++) {
+    const word = args[i];
+    if (word === "--dry-run") {
+      if (i + 1 < args.length && isFalseOptionValue(args[i + 1])) {
+        i++;
+        continue;
+      }
+      return true;
+    }
+    if (isPackageDryRunOption(word)) {
+      return true;
+    }
   }
+  return false;
+}
+
+function isPackageDryRunOption(word: string): boolean {
   if (!word.startsWith("--dry-run=")) {
     return false;
   }
   const value = word.slice("--dry-run=".length).toLowerCase();
   return value === "" || value === "true" || value === "1" || value === "yes" || value === "on";
+}
+
+function isFalseOptionValue(word: string): boolean {
+  const value = word.toLowerCase();
+  return value === "false" || value === "0" || value === "no" || value === "off";
 }
 
 function isPatchSegment(segment: string): boolean {
