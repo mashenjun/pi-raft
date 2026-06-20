@@ -398,7 +398,7 @@ function mentionsRejectedTaskId(text: string, taskId: string): boolean {
 
 function hasSameTaskContinuationIntent(text: string, oldTaskPattern: string): boolean {
   return /\bsame task\b/.test(text) ||
-    new RegExp(String.raw`${oldTaskPattern}.{0,60}\b(?:continue|resume|keep working|carry on)\b(?!(?:\s+(?:with|on)\s+(?!it\b|this task\b|the task\b|current task\b|same task\b)))`).test(text) ||
+    new RegExp(String.raw`${oldTaskPattern}.{0,60}\b(?:continue(?:\s+working)?|resume|keep working|carry on)\b(?:\s+(?:on\s+)?(?:it|this task|the task|current task|same task))?(?:[.!?,;:]|$)`).test(text) ||
     new RegExp(String.raw`\b(?:continue|resume|keep working|carry on)\b.{0,40}${oldTaskPattern}`).test(text) ||
     /\b(?:continue|resume|keep working|carry on)\b.{0,40}\b(?:it|this task|the task|current task)\b/.test(text);
 }
@@ -966,6 +966,12 @@ function envSplitStringCommands(command: string): string[] {
 function envWordIndex(words: string[]): number {
   let i = 0;
   while (i < words.length) {
+    if (commandBaseName(words[i]) === "command") {
+      const next = skipCommandPrefix(words, i + 1);
+      if (next === -1) return -1;
+      i = next;
+      continue;
+    }
     if (commandBaseName(words[i]) === "sudo") {
       const next = skipSudoPrefix(words, i + 1);
       if (next === -1) return -1;
@@ -1104,8 +1110,18 @@ function isMutatingShellSegment(segment: string, depth = 0): boolean {
 function isSudoEditSegment(segment: string): boolean {
   const words = shellWords(segment);
   let i = 0;
-  while (i < words.length && commandBaseName(words[i]) === "env") {
-    i = skipEnvPrefix(words, i + 1);
+  while (i < words.length) {
+    if (commandBaseName(words[i]) === "command") {
+      const next = skipCommandPrefix(words, i + 1);
+      if (next === -1) return false;
+      i = next;
+      continue;
+    }
+    if (commandBaseName(words[i]) === "env") {
+      i = skipEnvPrefix(words, i + 1);
+      continue;
+    }
+    break;
   }
   if (i >= words.length) {
     return false;
@@ -1291,8 +1307,15 @@ function hasPackageDryRunOption(args: string[]): boolean {
   let dryRun = false;
   for (let i = 0; i < args.length; i++) {
     const word = args[i];
+    if (word === "--") {
+      break;
+    }
     if (word === "--no-dry-run") {
       dryRun = false;
+      continue;
+    }
+    if (word.startsWith("--no-dry-run=")) {
+      dryRun = noDryRunOptionValueMeansDryRun(word);
       continue;
     }
     if (word === "--dry-run") {
@@ -1313,6 +1336,11 @@ function hasPackageDryRunOption(args: string[]): boolean {
     }
   }
   return dryRun;
+}
+
+function noDryRunOptionValueMeansDryRun(word: string): boolean {
+  const value = word.slice("--no-dry-run=".length).toLowerCase();
+  return isFalseOptionValue(value);
 }
 
 function isPackageDryRunOption(word: string): boolean {

@@ -277,6 +277,7 @@ describe("pi-raft extension integration", () => {
       "/usr/bin/env -iS-u PATH touch file.txt",
       "/usr/bin/env -iS -u PATH touch file.txt",
       "env -S 'bash -lc' 'command touch file.txt'",
+      "command env -S 'touch file.txt'",
       "sudo /usr/bin/env -iS 'touch file.txt'",
       'env --split-string=\'bash -lc "touch file.txt"\'',
       "sudo -u root bash -lc 'touch file.txt'",
@@ -351,6 +352,8 @@ describe("pi-raft extension integration", () => {
     expect(await harness.emit("tool_call", bash("env FOO=bar"))).toBeUndefined();
     expect(await harness.emit("tool_call", bash("sudo -udev id"))).toBeUndefined();
     expect(await harness.emit("tool_call", bash("sudo -gwheel id"))).toBeUndefined();
+    expect(await harness.emit("tool_call", bash("command -v env -S 'touch file.txt'"))).toBeUndefined();
+    expect(await harness.emit("tool_call", bash("command -v sudoedit"))).toBeUndefined();
     expect(harness.appended).toHaveLength(0);
 
     for (const command of [
@@ -367,7 +370,13 @@ describe("pi-raft extension integration", () => {
   it("blocks sudo edit mode before the claim gate", async () => {
     const harness = createHarness();
 
-    for (const command of ["sudo -e README.md", "sudo --edit README.md", "sudoedit README.md"]) {
+    for (const command of [
+      "sudo -e README.md",
+      "sudo --edit README.md",
+      "sudoedit README.md",
+      "command sudoedit README.md",
+      "command sudo -e README.md",
+    ]) {
       const result = await harness.emit("tool_call", bash(command));
       expect(result).toMatchObject({ block: true });
       expect(result.reason).toContain("shell file mutation");
@@ -405,6 +414,9 @@ describe("pi-raft extension integration", () => {
     expect(await harness.emit("tool_call", bash("npm install --dry-run=true"))).toBeUndefined();
     expect(await harness.emit("tool_call", bash("npm udpate --dry-run"))).toBeUndefined();
     expect(await harness.emit("tool_call", bash("npm ci --no-dry-run --dry-run"))).toBeUndefined();
+    expect(await harness.emit("tool_call", bash("npm install --dry-run -- --no-dry-run"))).toBeUndefined();
+    expect(await harness.emit("tool_call", bash("npm install --dry-run -- --dry-run=false"))).toBeUndefined();
+    expect(await harness.emit("tool_call", bash("npm ci --no-dry-run=false"))).toBeUndefined();
     for (const command of [
       "npm ci --dry-run=false",
       "npm udpate --dry-run false",
@@ -412,6 +424,8 @@ describe("pi-raft extension integration", () => {
       "npm ci --dry-run=no",
       "npm ci --dry-run --dry-run=false",
       "npm ci --dry-run --no-dry-run",
+      "npm install --dry-run --no-dry-run",
+      "npm ci --no-dry-run=true",
     ]) {
       const result = await harness.emit("tool_call", bash(command));
       expect(result).toMatchObject({ block: true });
@@ -1098,6 +1112,7 @@ describe("pi-raft extension integration", () => {
     for (const prompt of [
       "Do not finish task #42; start the README cleanup.",
       "Do not finish task #42; continue with the README cleanup instead.",
+      "Do not complete task #42 yet; continue doing the README cleanup.",
       "Task #42: no longer finish it; start the README cleanup.",
     ]) {
       const harness = createHarness([
